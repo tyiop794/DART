@@ -82,7 +82,7 @@ public :: obs_sequence_type, init_obs_sequence, interactive_obs_sequence, &
 public :: obs_type, init_obs, destroy_obs, get_obs_def, set_obs_def, &
    get_obs_values, set_obs_values, replace_obs_values, get_qc, set_qc, &  
    read_obs, write_obs, replace_qc, interactive_obs, copy_obs, assignment(=), &
-   get_obs_key, copy_partial_obs, print_obs
+   get_obs_key, copy_partial_obs, print_obs, send_obs, recv_obs
 
 ! Public interfaces for obs covariance modeling
 public :: obs_cov_type
@@ -1194,6 +1194,22 @@ call error_handler(E_MSG,'write_obs_seq',string1)
 
 end subroutine write_obs_seq
 
+!------------------------------------------------------------------
+subroutine send_obs(obs, proc)
+    integer,            intent(in)      :: proc
+    type(obs_type),     intent(inout)   :: obs
+
+
+end subroutine send_obs
+!------------------------------------------------------------------
+
+!------------------------------------------------------------------
+subroutine recv_obs(obs, proc)
+    integer,            intent(in)      :: proc
+    type(obs_type),     intent(inout)   :: obs
+
+
+end subroutine recv_obs
 !------------------------------------------------------------------
 
 subroutine read_obs_seq(file_name, add_copies, add_qc, add_obs, seq)
