@@ -144,10 +144,11 @@ type obs_type_alt
 ! Do I want to enforce the identity of the particular obs_sequence?
    integer :: key
    type(obs_def_type) :: def
-   real(r8), pointer :: values(:)  => NULL()
-   real(r8), pointer :: qc(:)      => NULL()
+   ! cannot send pointers as component of derived types
+   ! real(r8), pointer :: values(:)  => NULL()
+   ! real(r8), pointer :: qc(:)      => NULL()
    ! Put sort indices directly into the data structure
-   ! We can't do that when we're parallelizing
+   ! todo: We can't do that when we're parallelizing; think of something better
    integer :: prev_time, next_time
    integer :: cov_group
 end type obs_type_alt
@@ -1205,8 +1206,12 @@ type(obs_sequence_type), intent(out) :: seq
 
 integer :: i, num_copies, num_qc, num_obs, max_num_obs, file_id, io, num_obs_per_proc, rem, mpi_num, num_alloc, num_to_send, my_pe
 type(obs_type), allocatable :: buffer(:)
+type(obs_type_alt), allocatable :: buffer_alt(:)
+type(obs_type), allocatable :: ordered_buf(:)
 type(obs_type), allocatable :: ordered(:)
-integer :: first_time, last_time, abs_start, k, j
+real(r8), allocatable :: send_values(:)
+real(r8), allocatable :: send_qc(:)
+integer :: first_time, last_time, abs_start, k, j, l
 character(len=16) :: label(2)
 character(len=32) :: read_format
 logical :: dummy
@@ -1220,7 +1225,12 @@ my_pe = my_task_id()
 
 
 ! allocate memory into a buffer
-allocate(buffer(num_alloc))
+allocate(buffer(num_obs))
+allocate(buffer_alt(num_obs))
+allocate(ordered_buf(num_alloc))
+allocate(ordered(num_alloc))
+allocate(send_values(num_copies * num_alloc))
+allocate(send_qc(num_copies * num_alloc))
 
 ! Use read_obs_seq_header to get file format and header info
 ! KY Header can be read by all processes
@@ -1285,98 +1295,67 @@ if (seq%last_time < -1 .or. seq%last_time > max_num_obs) then
    call error_handler(E_ERR, 'read_obs_seq', string1, source)
 endif
 
-abs_start = 0
-abs_end = 0
-do k = 0, my_pe - 1
-    if (k < rem) then
-        abs_start = abs_start + num_obs_per_proc + 1
-    else
-        abs_start = abs_start + num_obs_per_proc
-    endif
-enddo
-if (my_pe < rem) then
-    abs_end = abs_start + num_obs_per_proc + 1
-else
-    abs_end = abs_start + num_obs_per_proc
+
+! Read all of the observations using the first process
+! This may consume lots of memory, but alternative methods would result in excessive communication
+! We may try something else if this doesn't work (ie. use a window)
+if (my_pe == 0) then
+    do j = 1, num_obs
+       if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
+       if (io /= 0) then
+          ! Read error of some type
+          write(string1, *) 'Read error in obs label', i, ' rc= ', io
+          call error_handler(E_ERR, 'read_obs_seq', string1, source)
+       endif
+       call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
+          read_format, num_obs)
+    ! Also set the key in the obs
+       buffer(j)%key = j
+       buffer(j)%num_obs = num_to_send
+       ! todo: make a function for this
+       buffer_alt(j)%key = buffer(j)%key
+       buffer_alt(j)%def = buffer(j)%def
+       buffer_alt(j)%prev_time = buffer(j)%prev_time
+       buffer_alt(j)%next_time = buffer(j)%next_time
+       buffer_alt(j)%cov_group = buffer(j)%cov_group
+    enddo
 endif
 
-do j = 1, num_obs
-   if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
-   if (io /= 0) then
-      ! Read error of some type
-      write(string1, *) 'Read error in obs label', i, ' rc= ', io
-      call error_handler(E_ERR, 'read_obs_seq', string1, source)
-   endif
-   call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
-      read_format, num_obs)
-! Also set the key in the obs
-   buffer(j)%key = j
-   buffer(j)%num_obs = num_to_send
-   if (j == 1) then
-       first_time = abs_start
-   endif
-enddo
-
 ! Now read in all the previously defined observations
+! todo: make a function for this; this is kinda gross
+l = 1
 do i = 0, mpi_num - 1:
     ! Check to determine whether the process receives a remainder
-    abs_start = 0
     if (i < rem) then
         num_to_send = num_obs_per_proc + 1
     else
         num_to_send = num_obs_per_proc
     endif
-    do k = 0, i ! TODO: if i == 0, will this still run at least once?
-        ! Calculate the first element's absolute starting time for each process
-        ! We can therefore compare window boundaries without communicating between processes
-        if (k < rem) then
-            abs_start = abs_start + num_obs_per_proc + 1
-        else
-            abs_start = abs_start + num_obs_per_proc
-        endif
-    enddo 
+    ! Sort the observations up to what the per-proc buffer allows
     if (my_pe == 0) then
+        !l = abs_start
+        seq%first_time = l
         do j = 1, num_to_send
-           if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
-           if (io /= 0) then
-              ! Read error of some type
-              write(string1, *) 'Read error in obs label', i, ' rc= ', io
-              call error_handler(E_ERR, 'read_obs_seq', string1, source)
-           endif
-           call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
-              read_format, num_obs)
-        ! Also set the key in the obs
-           buffer(j)%key = j
-           buffer(j)%num_obs = num_to_send
-           if (j == 1) then
-               first_time = abs_start
-           endif
+            ordered_buf(j) = buffer(l)
+            seq%last_time = l
+            l = buffer(l)%next_time
         enddo
+        ! send the set of observations and set bounds
+        ! if the first process is the receiving process, perform a direct copy
         if (i == 0) then
-            ! perform a direct copy if send and receive are same
-            seq%obs(1:j) = buffer(1:j)
+            ordered(1:num_to_send) = ordered_buf(1:num_to_send)
+            seq%num_obs = num_to_send
         else
-            ! send to owning process
-            call send_to(i, buffer(1:j)) ! figure out what the commands are for these
+            send_to(i, ordered_buf(1:num_to_send))
         endif
-    else 
-        call receive_from(0, buffer(1:j))
-        seq%obs(1:j) = buffer(1:j)
-        seq%num_obs = num_to_send
-        ! Shouldn't need to clear out buffer, since we are only moving towards and sending j elements
-        ! Just make sure that the end of the obs sequence (final obs) is clear
+    else
+        ! retrieve the observations using MPI
+        if (my_pe == i) then
+            receive_from(0, ordered_buf(1:num_to_send))
+            seq%num_obs = num_to_send
+        endif
     endif
 end do
-
-! Sort observations, using previous time and next time variables
-allocate(ordered(seq%num_obs))
-i = 1
-j = 1
-do while (j <= num_obs)
-    ordered(j) = seq%obs(i)
-    i = seq%obs(j)%next_time
-    j = j + 1
-enddo 
 
 ! Close up the file
 call close_file(file_id)
