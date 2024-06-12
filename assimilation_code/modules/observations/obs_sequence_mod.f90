@@ -1229,8 +1229,8 @@ allocate(buffer(num_obs))
 allocate(buffer_alt(num_obs))
 allocate(ordered_buf(num_alloc))
 allocate(ordered(num_alloc))
-allocate(send_values(num_copies * num_alloc))
-allocate(send_qc(num_copies * num_alloc))
+allocate(send_values(num_copies))
+allocate(send_qc(num_copies))
 
 ! Use read_obs_seq_header to get file format and header info
 ! KY Header can be read by all processes
@@ -1318,6 +1318,8 @@ if (my_pe == 0) then
        buffer_alt(j)%prev_time = buffer(j)%prev_time
        buffer_alt(j)%next_time = buffer(j)%next_time
        buffer_alt(j)%cov_group = buffer(j)%cov_group
+       send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
+       send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
     enddo
 endif
 
