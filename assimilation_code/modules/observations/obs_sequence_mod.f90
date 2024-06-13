@@ -20,6 +20,7 @@ module obs_sequence_mod
 ! obvious workaround exists. For now, make modules at higher levels use explicit
 ! copy subroutines. USERS MUST BE VERY CAREFUL TO NOT DO DEFAULT ASSIGNMENT
 ! FOR THESE TYPES THAT HAVE COPY SUBROUTINES.
+use mpi
 
 use        types_mod, only : r8, i8, MISSING_R8, metadatalength
 
@@ -138,12 +139,51 @@ type obs_type
    integer :: cov_group
 end type obs_type
 
-type obs_type_alt
+type obs_ints
+    private
+    integer :: key
+    integer :: which_vert
+    integer :: kind
+    integer :: seconds
+    integer :: days
+    integer :: obs_def_key
+    integer :: external_FO_key
+    integer :: ens_size
+    integer :: prev_time
+    integer :: next_time
+    integer :: cov_group
+end type obs_ints
+
+type obs_reals
+    private
+    real(r8) :: vloc
+
+end type obs_reals
+
+type obs_type_send
    private
 ! The key is needed to indicate the element number in the storage for the obs_sequence
 ! Do I want to enforce the identity of the particular obs_sequence?
+! Declare a simplified data structure for sending and receiving using MPI
    integer :: key
-   type(obs_def_type) :: def
+   ! Remove obs_def_type when sending obs to reduce complexity
+   ! type(obs_def_type) :: def
+   ! Define what is in obs_def_type here
+   ! Location
+   real(r8) :: vloc
+   integer  :: which_vert
+   integer  :: kind 
+   ! time_type
+   integer  :: seconds
+   integer  :: days
+   ! Other obs_def_type values
+   real(r8) :: error_variance
+   integer  :: obs_def_key
+   logical  :: write_external_FO = .false.
+   logical  :: has_external_FO = .false.
+   ! real(r8), allocatable    :: external_FO(:)
+   integer  :: external_FO_key
+   integer  :: ens_size
    ! cannot send pointers as component of derived types
    ! real(r8), pointer :: values(:)  => NULL()
    ! real(r8), pointer :: qc(:)      => NULL()
@@ -151,7 +191,7 @@ type obs_type_alt
    ! todo: We can't do that when we're parallelizing; think of something better
    integer :: prev_time, next_time
    integer :: cov_group
-end type obs_type_alt
+end type obs_type_send
 
 type obs_cov_type
    private
@@ -1195,14 +1235,181 @@ call error_handler(E_MSG,'write_obs_seq',string1)
 end subroutine write_obs_seq
 
 !------------------------------------------------------------------
+subroutine obs_to_contiguous(set, integers, reals, logicals, num_obs)
+    type(obs_sequence_type),    intent(in)       :: set(:)
+    integer,                    intent(in)       :: num_obs
+    logical,                    intent(out)      :: logicals
+    integer,                    intent(out)      :: integers
+    real(r8),                   intent(out)      :: reals
+end subroutine obs_from_contiguous
+!------------------------------------------------------------------
+
+
+!------------------------------------------------------------------
+subroutine send_obs_set(set, proc, num_obs, num_copies)
+    integer,                     intent(in)     :: proc
+    type(obs_type), dimension(:),    intent(inout)   :: set
+    integer,                     intent(in)     :: num_obs
+    integer,                     intent(in)     :: num_copies
+
+    type(obs_type), allocatable            :: vals(:)
+    integer                                     :: datatype
+    integer                                     :: ierror, i, num_ints, num_reals, num_logical, j, d, k
+    integer                                     :: send_ints, send_reals, send_logical
+    integer, allocatable                        :: integers(:)
+    real(r8), allocatable                       :: reals(:)
+    logical, allocatable                        :: logical_vals(:)
+    type(obs_type_send)                         :: initial
+
+    num_ints = 11
+    num_reals = 2 + (num_copies * 2)
+    num_logical = 2
+    d = 0
+
+    ! calculate the size of values being sent
+    send_ints = num_ints * num_obs
+    send_reals = num_reals * num_obs
+    send_logical = num_logical * num_obs
+
+    ! Place the types into contiguous arrays
+    allocate(integers(11 * num_obs))
+    allocate(reals((2+(num_copies*2)) * num_obs)) ! *2: for both qc and values sets
+    allocate(logical_vals(2))
+
+    do i = 1, num_obs
+        ! calculate integer displacement
+        d = (i-1)*(num_ints)
+
+        ! Set contiguous set of integers
+        integers(d + 1) = vals(i)%key
+        integers(d + 2) = vals(i)%def%which_vert
+        integers(d + 3) = vals(i)%def%kind
+        integers(d + 4) = vals(i)%def%time%seconds
+        integers(d + 5) = vals(i)%def%time%days
+        integers(d + 6) = vals(i)%def%obs_def_key
+        integers(d + 7) = vals(i)%def%external_FO_key
+        integers(d + 8) = vals(i)%def%ens_size
+        integers(d + 9) = vals(i)%prev_time
+        integers(d + 10) = vals(i)%next_time
+        integers(d + 11) = vals(i)%cov_group
+
+        ! contiguous set of reals
+        d = (i-1)*(num_reals - 1)
+        reals(d + 1) = vals(i)%vloc
+        reals(d + 2) = vals(i)%error_variance
+        k = d + 2
+        do j = 1, num_copies
+            reals(k + ((j-1) * 2) + 1) = vals(i)%values(j)
+            reals(k + ((j-1)*2) + 2) = vals(i)%qc(j)
+        enddo 
+
+        ! continuous set of logical values
+        d = (i-1)*num_logical
+        logical_vals(d + 1) = vals(i)%write_external_FO
+        logical_vals(d + 2) = vals(i)%has_external_FO
+    enddo
+
+    ! send the contiguous values
+    ! todo: this function may be better placed in mpi_utilities_mod
+    ! also: what if we are running on a single process
+    ! or: what if we are broadcasting instead of sending?  
+    mpi_send(integers, send_ints, MPI_INT, proc, 0, MPI_COMM_WORLD, ierror)
+    mpi_send(reals, send_reals, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    mpi_send(logical_vals, send_logical, MPI_LOGICAL, proc, 0, MPI_COMM_WORLD, ierror)
+
+    ! note: these need to be received in the same order
+    ! receiver also needs to convert contiguous arrays back into usable structs
+
+end subroutine send_obs_set
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+subroutine recv_obs_set(set, proc, num_obs, num_copies)
+    integer,                     intent(in)     :: proc
+    type(obs_sequence_type), dimension(:),    intent(inout)   :: set
+    integer,                     intent(in)     :: num_obs
+    integer,                     intent(in)     :: num_copies
+
+    type(obs_type_send), allocatable            :: vals(:)
+    integer                                     :: datatype
+    integer                                     :: ierror, i, num_ints, num_reals, num_logical, j, d, k
+    integer                                     :: send_ints, send_reals, send_logical
+    integer, allocatable                        :: integers(:)
+    real(r8), allocatable                       :: reals(:)
+    logical, allocatable                        :: logical_vals(:)
+    type(obs_type_send)                         :: initial
+
+    num_ints = 11
+    num_reals = 2 + (num_copies * 2)
+    num_logical = 2
+    d = 0
+
+    ! calculate the size of values being sent
+    send_ints = num_ints * num_obs
+    send_reals = num_reals * num_obs
+    send_logical = num_logical * num_obs
+
+    ! Place the types into contiguous arrays
+    allocate(integers(11 * num_obs))
+    allocate(reals((2+(num_copies*2)) * num_obs)) ! *2: for both qc and values sets
+    allocate(logical_vals(2))
+
+    ! retrieve the values from sending process in order they were sent
+    mpi_recv(integers, send_ints, MPI_INT, proc, 0, MPI_COMM_WORLD, ierror)
+    mpi_recv(reals, send_reals, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    mpi_recv(logical_vals, send_logical, MPI_LOGICAL, proc, 0, MPI_COMM_WORLD, ierror)
+
+    ! convert back to a struct
+    do i = 1, num_obs
+        ! calculate integer displacement
+        d = (i-1)*(num_ints)
+
+        ! Set contiguous set of integers
+        vals(i)%key = integers(d+1)
+        vals(i)%which_vert = integers(d+2)
+        vals(i)%kind = integers(d+3)
+        vals(i)%seconds = integers(d+4)
+        vals(i)%days = integers(d+5)
+        vals(i)%obs_def_key = integers(d+6)
+        vals(i)%external_FO_key = integers(d+7)
+        vals(i)%ens_size = integers(d+8)
+        vals(i)%prev_time = integers(d+9)
+        vals(i)%next_time = integers(d+10)
+        vals(i)%cov_group = integers(d+11)
+
+        ! contiguous set of reals
+        d = (i-1)*(num_reals - 1)
+        vals(i)%vloc = reals(d + 1)
+        vals(i)%error_variance = reals(d + 2)
+        k = d + 2
+        do j = 1, num_copies
+            vals(i)%values(j) = reals(k + ((j-1)*2) + 1)
+            vals(i)%qc(j) = reals(k + ((j-1)*2) + 2)
+        enddo 
+
+        ! continuous set of logical values
+        d = (i-1)*num_logical
+        vals(i)%write_external_FO = logical_vals(d + 1)
+        vals(i)%has_external_FO = logical_vals(d + 2)
+    enddo
+
+end subroutine recv_obs_set
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine send_obs(obs, proc)
     integer,            intent(in)      :: proc
     type(obs_type),     intent(inout)   :: obs
 
-
 end subroutine send_obs
 !------------------------------------------------------------------
 
+!------------------------------------------------------------------
+subroutine recv_obs_seq(obs, proc)
+    integer,            intent(in)      :: proc
+    type(obs_type),     intent(inout)   :: obs
+
+
+end subroutine recv_obs
+!------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine recv_obs(obs, proc)
     integer,            intent(in)      :: proc
@@ -1364,6 +1571,7 @@ do i = 0, mpi_num - 1:
             ordered(1:num_to_send) = ordered_buf(1:num_to_send)
             seq%num_obs = num_to_send
         else
+            ! This does not send derived types; need to fix
             send_to(i, ordered_buf(1:num_to_send))
         endif
     else
