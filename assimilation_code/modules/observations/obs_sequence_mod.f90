@@ -34,7 +34,7 @@ use      obs_def_mod, only : obs_def_type, get_obs_def_time, read_obs_def, &
                              set_obs_def_key, set_obs_def_time, set_obs_def_location, &
                              set_obs_def_type_of_obs, set_obs_def_error_variance, &
                              operator(==), operator(/=), print_obs_def
-use     mpi_utilities_mod, only : test_count, my_task_id, send_to, receive_from
+use     mpi_utilities_mod, only : task_count, my_task_id, send_to, receive_from
 
 use     obs_kind_mod, only : write_type_of_obs_table, &
                              read_type_of_obs_table, &
@@ -86,7 +86,7 @@ public :: obs_sequence_type, init_obs_sequence, interactive_obs_sequence, &
 public :: obs_type, init_obs, destroy_obs, get_obs_def, set_obs_def, &
    get_obs_values, set_obs_values, replace_obs_values, get_qc, set_qc, &  
    read_obs, write_obs, replace_qc, interactive_obs, copy_obs, assignment(=), &
-   get_obs_key, copy_partial_obs, print_obs, send_obs, recv_obs
+   get_obs_key, copy_partial_obs, print_obs, send_obs_set, recv_obs_set 
 
 ! Public interfaces for obs covariance modeling
 public :: obs_cov_type
@@ -1205,6 +1205,7 @@ end subroutine write_obs_seq
 
 subroutine destroy_obs_mpi(mpi_obstype)
     integer,                    intent(in)       :: mpi_obstype
+    integer                                      :: ierror
 
     call mpi_type_free(mpi_obstype, ierror)
 end subroutine destroy_obs_mpi
@@ -1233,7 +1234,7 @@ subroutine setup_obs_mpi(mpi_obstype)
     call mpi_get_address(initial%obs_def_key, address(6), ierror)
     call mpi_get_address(initial%prev_time, address(7), ierror)
     call mpi_get_address(initial%next_time, address(8), ierror)
-    call mpi_get_address(initial%cov_group, address(9)
+    call mpi_get_address(initial%cov_group, address(9), ierror)
     call mpi_get_address(initial%lon, address(10), ierror)
     call mpi_get_address(initial%lat, address(11), ierror)
     call mpi_get_address(initial%vloc, address(12), ierror)
@@ -1249,6 +1250,7 @@ subroutine setup_obs_mpi(mpi_obstype)
         offsets(i) = address(i) - address(1)
     enddo 
 
+    ! Commit the new data type
     call mpi_type_create_struct(num_vars, bl_var, offsets, oldtypes, mpi_obstype, ierror)
     call mpi_type_commit(mpi_obstype, ierror)
 
@@ -1258,7 +1260,7 @@ end subroutine setup_obs_mpi
 !------------------------------------------------------------------
 subroutine send_obs_set(set, proc, num_obs, num_values)
     type(obs_type),             intent(inout)      :: set(:)
-    integer,                    intent(inout)      :: proc
+    integer,                    intent(in)      :: proc
     integer,                    intent(inout)      :: num_obs
     integer,                    intent(inout)      :: num_values
 
@@ -1275,15 +1277,19 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     
     ! Convert to a struct with fully contiguous memory 
     call convert_obs_set(set, conv_set, values, qc, num_values, num_obs)
+    if (proc == 1) then
+        call print_obs_send(conv_set(1))
+    endif
 
     ! Setup the dedicated data structure
     call setup_obs_mpi(obs_mpi)
 
     ! Send the full set to processor specified
     ! also send values and qc
+    print *, 'total_values: ', total_values
+    call mpi_send(values, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    call mpi_send(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
     call mpi_send(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, ierror)
-    call mpi_send(values, num_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
-    call mpi_send(qc, num_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
 
     ! After send has completed, destroy the mpi struct
     call destroy_obs_mpi(obs_mpi)
@@ -1294,7 +1300,7 @@ end subroutine send_obs_set
 !------------------------------------------------------------------
 subroutine recv_obs_set(set, proc, num_obs, num_values)
     type(obs_type),             intent(inout)      :: set(:)
-    integer,                    intent(inout)      :: proc
+    integer,                    intent(in)      :: proc
     integer,                    intent(inout)      :: num_obs
     integer,                    intent(inout)      :: num_values
 
@@ -1317,9 +1323,14 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
 
     ! Retrieve the full set from proc specified
     ! also retrieve values and qc
-    call mpi_recv(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, ierror)
-    call mpi_recv(values, num_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
-    call mpi_recv(qc, num_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    print *, 'trying to receive observations' 
+    print *, 'total_values :', total_values
+    call mpi_recv(values, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE, ierror)
+    print *, '1'
+    call mpi_recv(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE, ierror)
+    print *, '2'
+    call mpi_recv(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE, ierror)
+    print *, '3'
 
     ! todo: this call should convert the simplified data structure back into the more complicated one
     ! this should help us (hopefully) avoid changing too much code...?
@@ -1333,22 +1344,6 @@ end subroutine recv_obs_set
 !------------------------------------------------------------------
 
 !------------------------------------------------------------------
-subroutine send_obs(obs, proc)
-    integer,            intent(in)      :: proc
-    type(obs_type),     intent(inout)   :: obs
-
-end subroutine send_obs
-!------------------------------------------------------------------
-
-!------------------------------------------------------------------
-subroutine recv_obs_seq(obs, proc)
-    integer,            intent(in)      :: proc
-    type(obs_type),     intent(inout)   :: obs
-
-
-end subroutine recv_obs
-!------------------------------------------------------------------
-!------------------------------------------------------------------
 subroutine recv_obs(obs, proc)
     integer,            intent(in)      :: proc
     type(obs_type),     intent(inout)   :: obs
@@ -1357,10 +1352,10 @@ subroutine recv_obs(obs, proc)
 end subroutine recv_obs
 !------------------------------------------------------------------
 subroutine convert_obs_set(orig, out_obs, out_values, out_qc, num_values, num_obs)
-    type(obs_type),         intent(in)  :: orig(:)
-    type(obs_type_send),    intent(out) :: out_obs(:)
-    real(r8),         intent(out) :: out_values(:)
-    real(r8),         intent(out) :: out_qc(:)
+    type(obs_type),         intent(in)  :: orig(num_obs)
+    type(obs_type_send),    intent(out) :: out_obs(num_obs)
+    real(r8),         intent(out) :: out_values(num_values*num_obs)
+    real(r8),         intent(out) :: out_qc(num_values*num_obs)
     integer,          intent(in)  :: num_values
     integer,          intent(in)  :: num_obs
 
@@ -1369,6 +1364,7 @@ subroutine convert_obs_set(orig, out_obs, out_values, out_qc, num_values, num_ob
     integer     :: which_vert
     type(location_type)  :: orig_location
     type(obs_def_type)   :: obs_def
+    type(time_type)      :: obs_time
 
 
     do i = 1, num_obs
@@ -1385,12 +1381,14 @@ subroutine convert_obs_set(orig, out_obs, out_values, out_qc, num_values, num_ob
         out_obs(i)%which_vert = nint(query_location(orig_location))
 
         ! get time
-        call get_time(get_obs_def_time(obs_def, seconds, days))
+        obs_time = get_obs_def_time(obs_def)
+        call get_time(obs_time, seconds, days)
         out_obs(i)%seconds = seconds
         out_obs(i)%days = days
 
         ! get other values
         out_obs(i)%kind = get_obs_def_type_of_obs(obs_def)
+        out_obs(i)%key = orig(i)%key
         out_obs(i)%prev_time = orig(i)%prev_time
         out_obs(i)%next_time = orig(i)%next_time
         out_obs(i)%cov_group = orig(i)%cov_group
@@ -1398,9 +1396,10 @@ subroutine convert_obs_set(orig, out_obs, out_values, out_qc, num_values, num_ob
         out_obs(i)%obs_def_key = get_obs_def_key(obs_def)
 
     enddo
+    call print_obs_send(out_obs(1))
 
     ! convert allocatable components to contiguous array
-    d = 1
+    d = 1 ! d for displacement
     do i = 1, num_obs
         out_values(d:d+num_values) = orig(i)%values(1:num_values)
         out_qc(d:d+num_values) = orig(i)%qc(1:num_values)
@@ -1411,11 +1410,30 @@ end subroutine convert_obs_set
 !------------------------------------------------------------------
 
 !------------------------------------------------------------------
+subroutine print_obs_send(obs_send)
+    type(obs_type_send),            intent(in)      :: obs_send
+    print *,'obs_send%key: ', obs_send%key
+    print *,'obs_send%which_vert: ',obs_send%which_vert
+    print *,'obs_send%kind: ',obs_send%kind
+    print *,'obs_send%seconds: ',obs_send%seconds
+    print *,'obs_send%days: ',obs_send%days
+    print *,'obs_send%obs_def_key: ',obs_send%obs_def_key
+    print *,'obs_send%prev_time: ',obs_send%prev_time
+    print *,'obs_send%next_time: ',obs_send%next_time
+    print *,'obs_send%cov_group: ',obs_send%cov_group
+    print *,'obs_send%lon: ',obs_send%lon
+    print *,'obs_send%lat: ',obs_send%lat
+    print *,'obs_send%vloc: ',obs_send%vloc
+    print *,'obs_send%error_variance: ',obs_send%error_variance
+end subroutine print_obs_send
+!------------------------------------------------------------------
+
+!------------------------------------------------------------------
 subroutine convert_obs_back(recv, simple_obs, in_values, in_qc, num_values, num_obs)
-    type(obs_type),         intent(out)  :: recv(:)
-    type(obs_type_send),    intent(in) :: simple_obs(:)
-    real(r8),         intent(in) :: in_values(:)
-    real(r8),         intent(in) :: in_qc(:)
+    type(obs_type),         intent(out)  :: recv(num_obs)
+    type(obs_type_send),    intent(in) :: simple_obs(num_obs)
+    real(r8),         intent(in) :: in_values(num_values*num_obs)
+    real(r8),         intent(in) :: in_qc(num_values*num_obs)
     integer,          intent(in)  :: num_values
     integer,          intent(in)  :: num_obs
 
@@ -1428,6 +1446,7 @@ subroutine convert_obs_back(recv, simple_obs, in_values, in_qc, num_values, num_
     do i = 1, num_obs
 
         ! set location
+        print *, simple_obs(i)%which_vert
         call set_obs_def_location(recv(i)%def, set_location(simple_obs(i)%lon, simple_obs(i)%lat, simple_obs(i)%vloc, &
             simple_obs(i)%which_vert))
 
@@ -1436,7 +1455,6 @@ subroutine convert_obs_back(recv, simple_obs, in_values, in_qc, num_values, num_
 
         ! get other values
         call set_obs_def_type_of_obs(recv(i)%def, simple_obs(i)%kind)
-        out_obs(i)%kind = get_obs_def_type_of_obs(obs_def)
         recv(i)%prev_time = simple_obs(i)%prev_time
         recv(i)%next_time = simple_obs(i)%next_time
         recv(i)%cov_group = simple_obs(i)%cov_group
@@ -1470,7 +1488,7 @@ integer :: i, num_copies, num_qc, num_obs, max_num_obs, file_id, io, num_obs_per
 type(obs_type), allocatable :: buffer(:)
 type(obs_type), allocatable :: ordered_buf(:)
 !type(obs_type), allocatable :: ordered(:)
-integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs
+integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror
 character(len=16) :: label(2)
 character(len=32) :: read_format
 logical :: dummy
@@ -1480,8 +1498,11 @@ logical :: dummy
 call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
    max_num_obs, file_id, read_format, dummy)
 
-total_copies = num_copies + add_copies
-total_obs = num_obs + add_obs
+! total_copies = num_copies + add_copies
+! total_obs = num_obs + add_obs
+
+total_copies = num_copies
+total_obs = num_obs
 
 ! Check number of processes and divide obs number to build blocks of obs
 mpi_num = task_count()
@@ -1494,6 +1515,10 @@ my_pe = my_task_id()
 ! only allocate a buffer for all obs on the first process
 if (my_pe == 0) then
     allocate(buffer(total_obs))
+    do i = 1, total_obs
+        allocate(buffer(i)%values(total_copies))
+        allocate(buffer(i)%qc(total_copies))
+    enddo
 endif
 
 allocate(ordered_buf(num_alloc))
@@ -1563,6 +1588,7 @@ endif
 ! This may consume lots of memory, but alternative methods would result in excessive communication
 ! We may try something else if this doesn't work (ie. use a window)
 if (my_pe == 0) then
+    print *, 'hi!'
     do j = 1, num_obs
        if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
        if (io /= 0) then
@@ -1584,7 +1610,7 @@ endif
 ! Now read in all the previously defined observations
 ! todo: make a function for this; this is kinda gross
 l = 1
-do i = 0, mpi_num - 1:
+do i = 0, mpi_num - 1
     ! Check to determine whether the process receives a remainder
     if (i < rem) then
         num_to_send = num_obs_per_proc + 1
@@ -1593,6 +1619,7 @@ do i = 0, mpi_num - 1:
     endif
     ! Sort the observations up to what the per-proc buffer allows
     if (my_pe == 0) then
+        print *, 'hi!'
         !l = abs_start
         ! order observations based on time taken rather than order read
         ! worst case: next time is on opposite end of linked list
@@ -1611,17 +1638,26 @@ do i = 0, mpi_num - 1:
         else
             ! This does not send derived types; need to fix
             ! send_obs_set(set, proc, num_obs, num_copies), 
-            send_obs_set(ordered_buf(1:num_to_send), i, num_to_send, total_copies), 
+            print *, 'Attempting to send to process ', i
+            print *, 'num_to_send: ', num_to_send
+            print *, 'total_copies: ', total_copies
+            call send_obs_set(ordered_buf(1:num_to_send), i, num_to_send, total_copies)
         endif
     else
         ! retrieve the observations using MPI
         if (my_pe == i) then
-            recv_obs_set(ordered_buf(1:num_to_send), 0, num_to_send, total_copies)
+            print *, 'Process ', i, ' is receiving'
+            print *, 'num_to_send: ', num_to_send
+            print *, 'total_copies: ', total_copies
+            call recv_obs_set(ordered_buf(1:num_to_send), 0, num_to_send, total_copies)
             seq%num_obs = num_to_send
             seq%obs(1:num_to_send) = ordered_buf(1:num_to_send)
         endif
     endif
 end do
+
+! No process should pass until all processes have received their obs
+call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 if (my_pe == 0) then
     deallocate(buffer)
