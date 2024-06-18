@@ -102,12 +102,12 @@ type obs_sequence_type
    ! F95 allows pointers to be initialized to a known value.
    ! However, if you get an error on the following lines from your
    ! compiler, remove the => NULL() from the end of the 5 lines below.
-   character(len=metadatalength), pointer :: copy_meta_data(:)  => NULL()
-   character(len=metadatalength), pointer :: qc_meta_data(:)    => NULL()
+   character(len=metadatalength), allocatable :: copy_meta_data(:)
+   character(len=metadatalength), allocatable :: qc_meta_data(:) 
    integer :: first_time
    integer :: last_time
 !   integer :: first_avail_time, last_avail_time
-   type(obs_type), pointer :: obs(:)   => NULL()
+   type(obs_type), allocatable :: obs(:)
 ! What to do about groups
 end type obs_sequence_type
 
@@ -117,8 +117,10 @@ type obs_type
 ! Do I want to enforce the identity of the particular obs_sequence?
    integer :: key
    type(obs_def_type) :: def
-   real(r8), pointer :: values(:)  => NULL()
-   real(r8), pointer :: qc(:)      => NULL()
+   real(r8), allocatable :: values(:)
+   real(r8), allocatable :: qc(:)
+   ! real(r8), allocatable :: values(:)
+   ! real(r8), allocatable :: qc(:)      
    ! Put sort indices directly into the data structure
    integer :: prev_time, next_time
    integer :: cov_group
@@ -265,13 +267,13 @@ integer :: i
 
 if ( seq%max_num_obs > 0 ) then
 
-   if (associated(seq%copy_meta_data)) then
+   if (allocated(seq%copy_meta_data)) then
       deallocate(seq%copy_meta_data)
-      nullify(seq%copy_meta_data)
+      ! nullify(seq%copy_meta_data)
    endif
-   if (associated(seq%qc_meta_data)) then
+   if (allocated(seq%qc_meta_data)) then
       deallocate(seq%qc_meta_data)
-      nullify(seq%qc_meta_data)
+      ! nullify(seq%qc_meta_data)
    endif
           
    do i = 1, seq%max_num_obs
@@ -281,9 +283,9 @@ if ( seq%max_num_obs > 0 ) then
    end do
 
    ! Also free up the obs storage in the sequence
-   if(associated(seq%obs)) then 
+   if(allocated(seq%obs)) then 
       deallocate(seq%obs)
-      nullify(seq%obs)
+      ! nullify(seq%obs)
    else
       print *, 'destroy_obs_sequence called but seq%obs not associated'
    endif
@@ -1290,6 +1292,10 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
         conv_set(i)%error_variance = 420.0
     enddo
     ! if (proc == 1) then
+    !     print *, 'values(1) (before recv): ', values(1)
+    !     print *, 'set(1)%values(1): ', set(1)%values(1)
+    ! endif 
+    ! if (proc == 1) then
         ! call print_obs_send(conv_set(1))
         ! print *, 'num_values: ', num_values
         ! print *, 'num_obs: ', num_obs
@@ -1306,6 +1312,10 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
         qc(d:d+diff) = set(i)%qc(1:num_values)
         d = d + diff + 1
     enddo 
+    ! if (proc == 1) then
+    !     print *, 'values(1) (before recv): ', values(1)
+    !     print *, 'set(1)%values(1): ', set(1)%values(1)
+    ! endif 
 
     ! Setup the dedicated data structure
     call setup_obs_mpi(obs_mpi)
@@ -1317,8 +1327,11 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     call mpi_send(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
     call mpi_send(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, ierror)
 
-    ! After send has completed, destroy the mpi struct
+    ! After send has completed, destroy the mpi struct and deallocate memory
     call destroy_obs_mpi(obs_mpi)
+    deallocate(conv_set)
+    deallocate(values)
+    deallocate(qc)
 
 
 end subroutine send_obs_set
@@ -1369,7 +1382,7 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
     ! diff = num_values - 1
     ! do i = 1, num_obs
     !     set(i)%values(1:num_values) = values(d:d+diff)
-    !     d = d + diff + 1
+    !    d = d + diff + 1
     ! enddo
     ! print *, 'end val loop'
 
@@ -1384,12 +1397,23 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
         set(i)%values(1:num_values) = values(d:d+diff)
         d = d + diff + 1
     enddo
+    ! if (my_task_id() == 1) then
+    !     print *, 'values(1): ', values(1)
+    !     print *, 'set(1)%key: ', set(1)%key
+    !     print *, 'set(1)%values(1): ', set(1)%values(1)
+    ! endif
 
     ! print *, 'set(1)%key (after setting values): ', set(1)%key
 
-    ! print *, 'set(1)%values(1) (after convert_obs_back): ', set(1)%values(1)
+    ! if (allocated(set(1)%values)) then
+    ! call print_obs_send(conv_set(1))
+        ! print *, 'set(1)%values(1) (after convert_obs_back): ', set(1)%values(1)
+    ! endif
     ! print *, 'hello from process ', my_task_id() 
 
+    deallocate(conv_set)
+    deallocate(values)
+    deallocate(qc)
     ! After send has completed, destroy the mpi struct
     call destroy_obs_mpi(obs_mpi)
 
@@ -1574,7 +1598,7 @@ total_obs = num_obs
 mpi_num = task_count()
 num_obs_per_proc = total_obs / mpi_num
 rem = modulo(total_obs, mpi_num)
-num_alloc = num_obs_per_proc + rem
+num_alloc = num_obs_per_proc + 1
 my_pe = my_task_id()
 
 ! allocate memory into a buffer
@@ -1683,6 +1707,9 @@ do i = 0, mpi_num - 1
     else
         num_to_send = num_obs_per_proc
     endif
+    if (i == 1 .and. my_pe == 0) then
+        print *, 'num_to_send to P1: ', num_to_send
+    endif
     ! Sort the observations up to what the per-proc buffer allows
     if (my_pe == 0) then
         ! print *, 'hi!'
@@ -1722,17 +1749,56 @@ do i = 0, mpi_num - 1
             ! print * , 'ordered_buf(1)%key(1) (after recv): ', ordered_buf(1)%key
             seq%num_obs = num_to_send
             seq%obs(1:num_to_send) = ordered_buf(1:num_to_send)
+            ! print * , 'ordered_buf(1)%values(1) (after copy to obs): ', ordered_buf(1)%values(1)
+            ! print * , 'ordered_buf(1)%key(1) (after copy to obs): ', ordered_buf(1)%key
             ! print *, 'seq%obs(1)%key: ', seq%obs(1)%key
         endif
     endif
 end do
 
 ! No process should pass until all processes have received their obs
+! Don't deallocate memory before all obs have been passed around successfully!
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 if (my_pe == 0) then
-    deallocate(buffer)
+    do i = 1, total_obs
+        if (allocated(buffer(i)%values)) then
+            deallocate(buffer(i)%values)
+        endif
+        if (allocated(buffer(i)%qc)) then
+            deallocate(buffer(i)%qc)
+        endif
+    enddo
+    if (allocated(buffer)) then
+        deallocate(buffer)
+    endif
 endif
+
+do i = 1, num_alloc
+     if (i == 1 .and. my_pe == 1) then
+         print *, 'ordered_buf(1)%values(1): ', ordered_buf(1)%values(1)
+     endif
+     if (allocated(ordered_buf(i)%values)) then
+         deallocate(ordered_buf(i)%values)
+     endif
+     if (allocated(ordered_buf(i)%qc)) then
+         deallocate(ordered_buf(i)%qc)
+     endif
+enddo
+if (allocated(ordered_buf)) then
+    deallocate(ordered_buf)
+endif
+
+! if (my_task_id() == 1) then
+!     ! does deallocating ordered_buf mess with the obs seq pointers?
+!     ! are these copies or merely references?
+!     ! Answer me, Fortran!
+!     print *, 'seq%obs(1)%key: ', seq%obs(1)%key
+!     print *, 'seq%obs(1)%values(1): ', seq%obs(1)%values(1)
+!     print *, 'seq%obs(3)%values(1): ', seq%obs(3)%values(1)
+! endif
+
+call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! Close up the file
 call close_file(file_id)
@@ -2604,7 +2670,7 @@ type(obs_type), intent(in) :: obs2
 obs1%key = obs2%key
 call copy_obs_def(obs1%def, obs2%def)
 
-if (associated(obs1%values)) then
+if (allocated(obs1%values)) then
    if (size(obs1%values) /= size(obs2%values)) then
       deallocate(obs1%values)
       allocate(obs1%values(size(obs2%values)))
@@ -2613,7 +2679,7 @@ else
    allocate(obs1%values(size(obs2%values)))
 endif
 
-if (associated(obs1%qc)) then
+if (allocated(obs1%qc)) then
    if (size(obs1%qc) /= size(obs2%qc)) then
       deallocate(obs1%qc)
       allocate(obs1%qc(size(obs2%qc)))
@@ -2646,7 +2712,7 @@ call error_handler(E_MSG, '', 'obs key: '//trim(string))
 call error_handler(E_MSG, '', 'obs def: ')
 call print_obs_def(obs1%def)
 
-if (associated(obs1%values)) then
+if (allocated(obs1%values)) then
    call error_handler(E_MSG, '', 'obs_copies: ')
    do i = 1, size(obs1%values)
       write(string, *) i, obs1%values(i)
@@ -2656,7 +2722,7 @@ else
    call error_handler(E_MSG, '', 'no copies')
 endif
 
-if (associated(obs1%qc)) then
+if (allocated(obs1%qc)) then
    call error_handler(E_MSG, '', 'obs_QCs: ')
    do i = 1, size(obs1%qc)
       write(string, *) i, obs1%qc(i)
@@ -2692,16 +2758,16 @@ eq_obs = .false.
 
 if (obs1%def /= obs2%def) return
 
-if (associated(obs1%values) .and. .not. associated(obs2%values)) return
-if (associated(obs2%values) .and. .not. associated(obs1%values)) return
+if (allocated(obs1%values) .and. .not. allocated(obs2%values)) return
+if (allocated(obs2%values) .and. .not. allocated(obs1%values)) return
 if (size(obs1%values) /= size(obs2%values)) return
    
 do i = 1, size(obs1%values)
    if (obs1%values(i) /= obs2%values(i)) return
 enddo
 
-if (associated(obs1%qc) .and. .not. associated(obs2%qc)) return
-if (associated(obs2%qc) .and. .not. associated(obs1%qc)) return
+if (allocated(obs1%qc) .and. .not. allocated(obs2%qc)) return
+if (allocated(obs2%qc) .and. .not. allocated(obs1%qc)) return
 if (size(obs1%qc) /= size(obs2%qc)) return
    
 do i = 1, size(obs1%qc)
@@ -2733,13 +2799,19 @@ subroutine destroy_obs(obs)
 ! Free up allocated storage in an observation type
 type(obs_type), intent(inout) :: obs
 
-if (associated(obs%values)) then
-   deallocate(obs%values)
-   nullify(obs%values)
+! if (associated(obs%values)) then
+!    deallocate(obs%values)
+!    nullify(obs%values)
+! endif
+! if (associated(obs%qc)) then
+!    deallocate(obs%qc)
+!    nullify(obs%qc)
+! endif
+if (allocated(obs%qc)) then
+    deallocate(obs%qc)
 endif
-if (associated(obs%qc)) then
-   deallocate(obs%qc)
-   nullify(obs%qc)
+if (allocated(obs%values)) then
+    deallocate(obs%values)
 endif
 !if pointers are nullified() then this is safe (and simpler).
 !deallocate(obs%values, obs%qc)
@@ -2791,7 +2863,7 @@ endif
 obs1%key = obs2%key
 call copy_obs_def(obs1%def, obs2%def)
 
-if (associated(obs1%values)) then
+if (allocated(obs1%values)) then
    if (size(obs1%values) /= numcopies) then
       deallocate(obs1%values)
       allocate(obs1%values(numcopies))
@@ -2800,7 +2872,7 @@ else
    allocate(obs1%values(numcopies))
 endif
 
-if (associated(obs1%qc)) then
+if (allocated(obs1%qc)) then
    if (size(obs1%qc) /= numqc) then
       deallocate(obs1%qc)
       allocate(obs1%qc(numqc))
