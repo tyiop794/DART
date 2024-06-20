@@ -1457,7 +1457,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
     allocate(conv_set(num_obs_per_proc))
     ! allocate(values(total_values * 10))
 
-    all_values = total_values * 2 * nprocs
+    all_values = total_values * 2 ! values + qc = 2
     vals_per_proc = all_values / nprocs
     if (my_task_id() == 0) then
         allocate(all_values_qc(all_values))
@@ -1505,11 +1505,11 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
     ! Let's try using MPI_Scatter instead! 
     ! Or perhaps use MPI_Scatterv? (fewer scatter calls)
     ! Test simplest possible option to determine how fast it will be (not 100% accurate distribution, but still)
-    call mpi_scatter(all_values_qc, vals_per_proc, MPI_REAL8, values_qc, vals_per_proc, MPI_REAL8, 0, MPI_COMM_WORLD, ierror)
-    call mpi_scatter(all_conv_set, num_obs_per_proc, obs_mpi, conv_set, num_obs_per_proc, obs_mpi, 0, MPI_COMM_WORLD, ierror)
+    ! call mpi_scatter(all_conv_set, num_obs_per_proc, obs_mpi, conv_set, num_obs_per_proc, obs_mpi, 0, MPI_COMM_WORLD, ierror)
+    ! call mpi_scatter(all_values_qc, vals_per_proc, MPI_REAL8, values_qc, vals_per_proc, MPI_REAL8, 0, MPI_COMM_WORLD, ierror)
 
     ! Repack obs sequence
-    call convert_obs_back(new_set, conv_set, num_values, num_obs_per_proc)
+    ! call convert_obs_back(new_set, conv_set, num_values, num_obs_per_proc)
     ! print *, 'set(1)%key (before setting values): ', set(1)%key
     ! do values_qc conversion, but in reverse
     
