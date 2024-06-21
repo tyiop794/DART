@@ -1704,9 +1704,11 @@ type(obs_type), allocatable :: buffer(:)
 type(obs_type), allocatable :: ordered_buf(:)
 type(obs_type), allocatable :: my_ordered_buf(:)
 !type(obs_type), allocatable :: ordered(:)
-integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs
+integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, num_lines
 character(len=16) :: label(2)
 character(len=32) :: read_format
+character(len=4) :: test_line
+character(len=128) :: test_line_two
 logical :: dummy
 
 ! Use read_obs_seq_header to get file format and header info
@@ -1806,47 +1808,68 @@ if (seq%last_time < -1 .or. seq%last_time > max_num_obs) then
    call error_handler(E_ERR, 'read_obs_seq', string1, source)
 endif
 
+if (my_pe == 0) then
+    print *, 'hi there!'
+    num_lines = 1
+    read(file_id, '(a4)') test_line
+    read(file_id, '(a4)') test_line
+    do while (test_line /= ' OBS')
+        num_lines = num_lines + 1
+        read(file_id, '(a4)') test_line
+        if (num_lines < 13) then
+            print *, test_line
+        endif
+    enddo
 
+    print *, 'num_lines: ', num_lines
+    do i = 1, num_lines + 2
+        backspace(file_id)
+    enddo
+    read(file_id, *) test_line_two 
+    print *, test_line_two
+endif
+
+call close_file(file_id)
 ! Read all of the observations using the first process
 ! This may consume lots of memory, but alternative methods would result in excessive communication
 ! We may try something else if this doesn't work (ie. use a window)
-if (my_pe == 0) then
-    ! print *, 'hi!'
-    do j = 1, num_obs
-       if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
-       if (io /= 0) then
-          ! Read error of some type
-          write(string1, *) 'Read error in obs label', i, ' rc= ', io
-          call error_handler(E_ERR, 'read_obs_seq', string1, source)
-       endif
-       call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
-          read_format, num_obs)
-    ! Also set the key in the obs
-       buffer(j)%key = j
-       ! create separate arrays so that values and qc can be sent contiguously
-       ! better to calculate this when we've already decided the order in which array will be sent
-       !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
-       !send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
-    enddo
-endif
+! if (my_pe == 0) then
+!     ! print *, 'hi!'
+!     do j = 1, num_obs
+!        if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
+!        if (io /= 0) then
+!           ! Read error of some type
+!           write(string1, *) 'Read error in obs label', i, ' rc= ', io
+!           call error_handler(E_ERR, 'read_obs_seq', string1, source)
+!        endif
+!        call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
+!           read_format, num_obs)
+!     ! Also set the key in the obs
+!        buffer(j)%key = j
+!        ! create separate arrays so that values and qc can be sent contiguously
+!        ! better to calculate this when we've already decided the order in which array will be sent
+!        !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
+!        !send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
+!     enddo
+! endif
 
-! for testing purposes
-actual_obs = total_obs - rem
-
-! order our observations by time 
-if (my_pe == 0) then
-    l = 1
-    do i = 1, actual_obs
-        ordered_buf(i) = buffer(l)
-        l = buffer(l)%next_time
-    enddo
-endif
-
-! called by every process; should split the observations 
-call scatter_obs_set(ordered_buf, my_ordered_buf, num_obs_per_proc, total_copies, task_count())
-
-! copy retrieved observations to obs_seq
-seq%obs(1:num_obs_per_proc) = my_ordered_buf(1:num_obs_per_proc)
+! ! for testing purposes
+! actual_obs = total_obs - rem
+!
+! ! order our observations by time 
+! if (my_pe == 0) then
+!     l = 1
+!     do i = 1, actual_obs
+!         ordered_buf(i) = buffer(l)
+!         l = buffer(l)%next_time
+!     enddo
+! endif
+!
+! ! called by every process; should split the observations 
+! call scatter_obs_set(ordered_buf, my_ordered_buf, num_obs_per_proc, total_copies, task_count())
+!
+! ! copy retrieved observations to obs_seq
+! seq%obs(1:num_obs_per_proc) = my_ordered_buf(1:num_obs_per_proc)
 
 
 
@@ -3233,7 +3256,7 @@ end subroutine write_obs
 !-------------------------------------------------
 
 subroutine read_obs(file_id, num_copies, add_copies, num_qc, add_qc, key, &
-                    obs, read_format, max_obs)
+                    obs, read_format, max_obs, num_lines)
 
 ! Read in observation from file, watch for allocation of storage
 ! This RELIES on the fact that obs%values(1) is ALWAYS the observation value
@@ -3247,6 +3270,7 @@ integer,            intent(in)    :: num_qc, add_qc, key
 character(len=*),   intent(in)    :: read_format
 type(obs_type),     intent(inout) :: obs
 integer, optional,  intent(in)    :: max_obs
+integer, optional,  intent(out)    :: num_lines
 
 integer  :: i, io
 real(r8) :: temp_val
@@ -3264,6 +3288,7 @@ if(num_copies > 0) then
       end do
    else
       read(file_id, *, iostat=io) obs%values(1:num_copies)
+      num_lines = num_lines + 1
       if (io /= 0) then
          ! Read error of some type
          write(string1, *) 'Read error in obs values, rc= ', io
@@ -3284,6 +3309,7 @@ if(num_qc > 0) then
       end do
    else
       read(file_id, *, iostat=io) obs%qc(1:num_qc)
+      num_lines = num_lines + 1
       if (io /= 0) then
          ! Read error of some type
          write(string1, *) 'Read error in qc values, rc= ', io
@@ -3304,6 +3330,7 @@ if(read_format == 'unformatted') then
    read(file_id, iostat=io) obs%prev_time, obs%next_time, obs%cov_group
 else
    read(file_id, *, iostat=io) obs%prev_time, obs%next_time, obs%cov_group
+   num_lines = num_lines + 1
 endif
 if (io /= 0) then
    ! Read error of some type
