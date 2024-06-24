@@ -21,6 +21,7 @@ module obs_sequence_mod
 ! copy subroutines. USERS MUST BE VERY CAREFUL TO NOT DO DEFAULT ASSIGNMENT
 ! FOR THESE TYPES THAT HAVE COPY SUBROUTINES.
 use mpi
+use ifport
 
 use        types_mod, only : r8, i8, MISSING_R8, metadatalength
 
@@ -1691,6 +1692,92 @@ end subroutine convert_obs_back
 
 !------------------------------------------------------------------
 
+!------------------------------------------------------------------
+subroutine get_job_info(nthreads, nnodes)
+    integer,            intent(out)  :: nthreads
+    integer,            intent(out)  :: nnodes
+    character(len=512)               :: env_value
+    character(len=64), dimension(13)  :: envs_sep
+    
+    integer                          :: i
+
+    call get_environment_variable('PBS_SELECT', env_value)
+    do i = 1, len_trim(env_value)
+        if (env_value(i:i) == ':' .or. env_value(i:i) == '=') env_value(i:i) = ','
+    enddo
+
+    read(env_value, *) envs_sep(1:13)
+    read(envs_sep(1), *) nnodes
+    read(envs_sep(3), *) nthreads
+
+
+end subroutine get_job_info
+!------------------------------------------------------------------
+
+!------------------------------------------------------------------
+subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, obs_per_this_proc)
+    integer,            intent(in)          :: obs_size
+    integer,            intent(in)          :: my_pe
+    integer,            intent(in)          :: num_obs 
+    integer,            intent(in)          :: num_pes
+    integer(i8),        intent(in)          :: start_pos
+    integer(i8),        intent(out)         :: obs_pos
+    integer,            intent(out)         :: starting_obs, obs_per_this_proc
+    integer                                 :: rem, i, obs_with_rem
+
+    obs_per_proc = num_obs / num_pes
+    rem = modulo(num_obs, num_pes)
+    obs_with_rem = obs_per_proc + 1
+
+    obs_pos = start_pos
+    starting_obs = 0
+    do i = 0, my_pe - 1
+        if (i < rem) then
+            obs_pos = obs_pos + (obs_with_rem * obs_size)
+            starting_obs = starting_obs + obs_with_rem
+        else
+            obs_pos = obs_pos + (obs_per_proc * obs_size)
+            starting_obs = starting_obs + obs_per_proc
+        endif
+    enddo
+
+    if (my_pe < rem) then
+        obs_per_this_proc = obs_per_proc
+    else
+        obs_per_this_proc = obs_with_rem
+    endif
+
+    
+end subroutine calc_obs_params
+!------------------------------------------------------------------
+
+!------------------------------------------------------------------
+subroutine get_obs_size(file_id, obs_size, num_values, init_pos)
+    integer,            intent(in)          :: file_id
+    integer,            intent(in)          :: num_values
+    integer,            intent(out)         :: obs_size
+    integer(i8),        intent(out)         :: init_pos
+    type(obs_type)                          :: test_obs
+    integer                                 :: final_pos, i
+    
+    allocate(test_obs%values(num_values))
+    allocate(test_obs%qc(num_values))
+
+    ! Determine our initial position
+    init_pos = ftell(file_id)
+
+    ! Read observation
+    ! some of these values are false but it shouldn't matter here
+    call read_obs(file_id, num_values, 0, num_values, 0, 1, test_obs, &
+      'unformatted', 50)
+
+    ! Calculate final position and difference
+    final_pos = ftell(file_id)
+    obs_size = final_pos - init_pos
+
+end subroutine get_obs_size
+!------------------------------------------------------------------
+
 subroutine read_obs_seq(file_name, add_copies, add_qc, add_obs, seq)
 
 ! Be able to increase size at read in time for efficiency
@@ -1703,9 +1790,12 @@ integer :: i, num_copies, num_qc, num_obs, max_num_obs, file_id, io, num_obs_per
 type(obs_type), allocatable :: buffer(:)
 type(obs_type), allocatable :: ordered_buf(:)
 type(obs_type), allocatable :: my_ordered_buf(:)
+type(obs_type) :: test_obs
 !type(obs_type), allocatable :: ordered(:)
-integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, num_lines, split_obs, obs_pos
-integer :: lower_bound, upper_bound, obs_per_proc, x, num_split
+integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
+integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe
+integer :: num_offset_pes, my_pe_orig, mpi_num_orig
+integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos 
 character(len=16) :: label(2)
 character(len=32) :: read_format
 character(len=4) :: test_line
@@ -1722,7 +1812,13 @@ call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
 
 total_copies = num_copies
 total_obs = num_obs
-num_split = 1280
+
+! Split by how much?
+! Should probably use an environment variable
+! How about PBS_SELECT?
+! num_split = 8 ! maybe don't hardcode this?
+
+
 
 ! Check number of processes and divide obs number to build blocks of obs
 mpi_num = task_count()
@@ -1731,7 +1827,13 @@ rem = modulo(total_obs, mpi_num)
 num_alloc = num_obs_per_proc + 1
 my_pe = my_task_id()
 
-obs_per_proc = total_obs / num_split
+call get_job_info(nthreads, nnodes)
+if (my_pe == 0) then
+    print *, 'nthreads: ', nthreads
+    print *, 'nnodes: ', nnodes
+endif
+
+! obs_per_proc = total_obs / num_split
 ! allocate memory into a buffer
 ! only allocate a buffer for all obs on the first process
 ! this includes the ordered buffer
@@ -1811,82 +1913,63 @@ if (seq%last_time < -1 .or. seq%last_time > max_num_obs) then
    call error_handler(E_ERR, 'read_obs_seq', string1, source)
 endif
 
-! How many lines is a single observation?
-! This could vary for each model, so we need to check whenever we run
-! Note: this does not take into account binary or unformatted files? 
-!       What to do about those?
-num_lines = 1
-read(file_id, '(a4)') test_line
-read(file_id, '(a4)') test_line
-do while (test_line /= ' OBS')
-    num_lines = num_lines + 1
-    read(file_id, '(a4)') test_line
-enddo
 
-! print *, 'num_lines: ', num_lines
-do i = 1, num_lines + 1
-    backspace(file_id)
-enddo
-! read(file_id, *) test_line_two 
-! print *, test_line_two
+! Offset my_pe so that we can conserve space on the first node
+! (currently) assuming that we are using more than a single node
+my_pe_orig = my_pe
+mpi_num_orig = mpi_num
+my_pe = my_pe - nthreads
+mpi_num = mpi_num - nthreads
 
-! call mpi_bcast(num_lines, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierror)
+! Get byte size of each obs
+call get_obs_size(file_id, obs_size, total_copies, init_pos)
 
+! Determine num obs per procs and starting obs
+call calc_obs_params(obs_size, my_pe, mpi_num, num_obs, init_pos, obs_pos, lower_bound, split_obs)
 
-split_obs = num_obs / num_split 
+io = fseek(file_id, obs_pos, 0) 
 
-! currently not handling remainder so we need to improvise
-num_obs = split_obs * num_split 
-
-obs_pos = num_lines * split_obs
-lower_bound = (split_obs * my_pe) + 1
-upper_bound = (split_obs * (my_pe + 1)) - 1
-
-! KY do we need this? I think we can handle this in a single loop (the one down there)
-! if (my_pe <= 3) then
-!     do i = 1, split_obs * (my_pe)
-!         do j = 1, num_lines
-!             read(file_id, '(A)') test_line_two
-!         enddo
-!     enddo
-! endif
-
-
-! call close_file(file_id)
-! Read all of the observations using the first process
-! This may consume lots of memory, but alternative methods would result in excessive communication
-! We may try something else if this doesn't work (ie. use a window)
-if (my_pe < num_split) then
+! Read all of the observations using all procs except for those on the first node
+x = lower_bound
+if (my_pe >= 0) then
     ! print *, 'hi!'
-    do j = 1, num_obs
+    ! do j = 1, num_obs
+    do j = 1, split_obs
        ! if observation is in our set, read
        ! no need to read if we are past our upper bound
-       if (j > upper_bound) exit
-       if (j >= lower_bound .and. j <= upper_bound) then
-           x = modulo(j, split_obs)
-           if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
-           if (io /= 0) then
-              ! Read error of some type
-              write(string1, *) 'Read error in obs label', i, ' rc= ', io
-              call error_handler(E_ERR, 'read_obs_seq', string1, source)
-           endif
-           call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(x), &
-              read_format, num_obs)
+       ! if (j > upper_bound) exit
+       ! if (j >= lower_bound .and. j <= upper_bound) then
+           ! x = modulo(j, split_obs)
+           ! if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
+           ! if (io /= 0) then
+           !    ! Read error of some type
+           !    write(string1, *) 'Read error in obs label', i, ' rc= ', io
+           !    call error_handler(E_ERR, 'read_obs_seq', string1, source)
+           ! endif
+           call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
+              read_format, total_obs)
+          ! if (j == 1) then
+          !     print *, 'values(1): ', buffer(j)%values(1), ' from proc : ', my_pe, ' offset: ', obs_pos, 'key: ', x
+          ! endif
         ! Also set the key in the obs
-           buffer(x)%key = j
+        ! Make sure the key is absolute, not relative to the observations being read by this proc
+           buffer(j)%key = x
+           x = x + 1
            ! create separate arrays so that values and qc can be sent contiguously
            ! better to calculate this when we've already decided the order in which array will be sent
            !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
            !send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
-       else
+       ! else
          ! ...otherwise, skip the observation
-         do l = 1, num_lines
-             read(file_id, '(A)') test_line_two
-         enddo
-       endif
+         ! do l = 1, num_lines
+         !     read(file_id, '(A)') test_line_two
+         ! enddo
+       ! endif
     enddo
 endif
 
+! call mpi_barrier(MPI_COMM_WORLD, ierror)
+!
 ! ! for testing purposes
 ! actual_obs = total_obs - rem
 !
@@ -1972,40 +2055,40 @@ endif
 ! Don't deallocate memory before all obs have been passed around successfully!
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-if (my_pe == 0) then
-    do i = 1, obs_per_proc
-        if (allocated(buffer(i)%values)) then
-            deallocate(buffer(i)%values)
-        endif
-        if (allocated(buffer(i)%qc)) then
-            deallocate(buffer(i)%qc)
-        endif
-        if (allocated(ordered_buf(i)%values)) then
-            deallocate(ordered_buf(i)%values)
-        endif
-        if (allocated(ordered_buf(i)%qc)) then
-            deallocate(ordered_buf(i)%qc)
-        endif
-    enddo
-    if (allocated(buffer)) then
-        deallocate(buffer)
-    endif
-    if (allocated(ordered_buf)) then
-        deallocate(ordered_buf)
-    endif
-endif
-
-do i = 1, num_alloc
-     if (allocated(my_ordered_buf(i)%values)) then
-         deallocate(my_ordered_buf(i)%values)
-     endif
-     if (allocated(my_ordered_buf(i)%qc)) then
-         deallocate(my_ordered_buf(i)%qc)
-     endif
-enddo
-if (allocated(my_ordered_buf)) then
-    deallocate(my_ordered_buf)
-endif
+! if (my_pe == 0) then
+!     do i = 1, obs_per_proc
+!         if (allocated(buffer(i)%values)) then
+!             deallocate(buffer(i)%values)
+!         endif
+!         if (allocated(buffer(i)%qc)) then
+!             deallocate(buffer(i)%qc)
+!         endif
+!         if (allocated(ordered_buf(i)%values)) then
+!             deallocate(ordered_buf(i)%values)
+!         endif
+!         if (allocated(ordered_buf(i)%qc)) then
+!             deallocate(ordered_buf(i)%qc)
+!         endif
+!     enddo
+!     if (allocated(buffer)) then
+!         deallocate(buffer)
+!     endif
+!     if (allocated(ordered_buf)) then
+!         deallocate(ordered_buf)
+!     endif
+! endif
+!
+! do i = 1, num_alloc
+!      if (allocated(my_ordered_buf(i)%values)) then
+!          deallocate(my_ordered_buf(i)%values)
+!      endif
+!      if (allocated(my_ordered_buf(i)%qc)) then
+!          deallocate(my_ordered_buf(i)%qc)
+!      endif
+! enddo
+! if (allocated(my_ordered_buf)) then
+!     deallocate(my_ordered_buf)
+! endif
 
 ! if (my_task_id() == 1) then
 !     ! does deallocating ordered_buf mess with the obs seq pointers?
@@ -2016,7 +2099,7 @@ endif
 !     print *, 'seq%obs(3)%values(1): ', seq%obs(3)%values(1)
 ! endif
 
-call mpi_barrier(MPI_COMM_WORLD, ierror)
+! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! Close up the file
 call close_file(file_id)
