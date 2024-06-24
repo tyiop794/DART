@@ -1704,7 +1704,8 @@ type(obs_type), allocatable :: buffer(:)
 type(obs_type), allocatable :: ordered_buf(:)
 type(obs_type), allocatable :: my_ordered_buf(:)
 !type(obs_type), allocatable :: ordered(:)
-integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, num_lines
+integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, num_lines, split_obs, obs_pos
+integer :: lower_bound, upper_bound, obs_per_proc, x, num_split
 character(len=16) :: label(2)
 character(len=32) :: read_format
 character(len=4) :: test_line
@@ -1721,6 +1722,7 @@ call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
 
 total_copies = num_copies
 total_obs = num_obs
+num_split = 1280
 
 ! Check number of processes and divide obs number to build blocks of obs
 mpi_num = task_count()
@@ -1729,14 +1731,15 @@ rem = modulo(total_obs, mpi_num)
 num_alloc = num_obs_per_proc + 1
 my_pe = my_task_id()
 
+obs_per_proc = total_obs / num_split
 ! allocate memory into a buffer
 ! only allocate a buffer for all obs on the first process
 ! this includes the ordered buffer
 ! otherwise, only allocate the ordered buffer, and with num_alloc
-if (my_pe == 0) then
-    allocate(buffer(total_obs))
-    allocate(ordered_buf(total_obs))
-    do i = 1, total_obs
+if (my_pe < num_split) then
+    allocate(buffer(obs_per_proc))
+    allocate(ordered_buf(obs_per_proc))
+    do i = 1, total_obs / num_split
         allocate(buffer(i)%values(total_copies))
         allocate(buffer(i)%qc(total_copies))
         allocate(ordered_buf(i)%values(total_copies))
@@ -1808,50 +1811,81 @@ if (seq%last_time < -1 .or. seq%last_time > max_num_obs) then
    call error_handler(E_ERR, 'read_obs_seq', string1, source)
 endif
 
-if (my_pe == 0) then
-    print *, 'hi there!'
-    num_lines = 1
+! How many lines is a single observation?
+! This could vary for each model, so we need to check whenever we run
+! Note: this does not take into account binary or unformatted files? 
+!       What to do about those?
+num_lines = 1
+read(file_id, '(a4)') test_line
+read(file_id, '(a4)') test_line
+do while (test_line /= ' OBS')
+    num_lines = num_lines + 1
     read(file_id, '(a4)') test_line
-    read(file_id, '(a4)') test_line
-    do while (test_line /= ' OBS')
-        num_lines = num_lines + 1
-        read(file_id, '(a4)') test_line
-        if (num_lines < 13) then
-            print *, test_line
-        endif
-    enddo
+enddo
 
-    print *, 'num_lines: ', num_lines
-    do i = 1, num_lines + 2
-        backspace(file_id)
-    enddo
-    read(file_id, *) test_line_two 
-    print *, test_line_two
-endif
+! print *, 'num_lines: ', num_lines
+do i = 1, num_lines + 1
+    backspace(file_id)
+enddo
+! read(file_id, *) test_line_two 
+! print *, test_line_two
 
-call close_file(file_id)
+! call mpi_bcast(num_lines, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierror)
+
+
+split_obs = num_obs / num_split 
+
+! currently not handling remainder so we need to improvise
+num_obs = split_obs * num_split 
+
+obs_pos = num_lines * split_obs
+lower_bound = (split_obs * my_pe) + 1
+upper_bound = (split_obs * (my_pe + 1)) - 1
+
+! KY do we need this? I think we can handle this in a single loop (the one down there)
+! if (my_pe <= 3) then
+!     do i = 1, split_obs * (my_pe)
+!         do j = 1, num_lines
+!             read(file_id, '(A)') test_line_two
+!         enddo
+!     enddo
+! endif
+
+
+! call close_file(file_id)
 ! Read all of the observations using the first process
 ! This may consume lots of memory, but alternative methods would result in excessive communication
 ! We may try something else if this doesn't work (ie. use a window)
-! if (my_pe == 0) then
-!     ! print *, 'hi!'
-!     do j = 1, num_obs
-!        if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
-!        if (io /= 0) then
-!           ! Read error of some type
-!           write(string1, *) 'Read error in obs label', i, ' rc= ', io
-!           call error_handler(E_ERR, 'read_obs_seq', string1, source)
-!        endif
-!        call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
-!           read_format, num_obs)
-!     ! Also set the key in the obs
-!        buffer(j)%key = j
-!        ! create separate arrays so that values and qc can be sent contiguously
-!        ! better to calculate this when we've already decided the order in which array will be sent
-!        !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
-!        !send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
-!     enddo
-! endif
+if (my_pe < num_split) then
+    ! print *, 'hi!'
+    do j = 1, num_obs
+       ! if observation is in our set, read
+       ! no need to read if we are past our upper bound
+       if (j > upper_bound) exit
+       if (j >= lower_bound .and. j <= upper_bound) then
+           x = modulo(j, split_obs)
+           if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
+           if (io /= 0) then
+              ! Read error of some type
+              write(string1, *) 'Read error in obs label', i, ' rc= ', io
+              call error_handler(E_ERR, 'read_obs_seq', string1, source)
+           endif
+           call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(x), &
+              read_format, num_obs)
+        ! Also set the key in the obs
+           buffer(x)%key = j
+           ! create separate arrays so that values and qc can be sent contiguously
+           ! better to calculate this when we've already decided the order in which array will be sent
+           !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
+           !send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
+       else
+         ! ...otherwise, skip the observation
+         do l = 1, num_lines
+             read(file_id, '(A)') test_line_two
+         enddo
+       endif
+    enddo
+endif
 
 ! ! for testing purposes
 ! actual_obs = total_obs - rem
@@ -1939,7 +1973,7 @@ call close_file(file_id)
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 if (my_pe == 0) then
-    do i = 1, total_obs
+    do i = 1, obs_per_proc
         if (allocated(buffer(i)%values)) then
             deallocate(buffer(i)%values)
         endif
@@ -3256,7 +3290,7 @@ end subroutine write_obs
 !-------------------------------------------------
 
 subroutine read_obs(file_id, num_copies, add_copies, num_qc, add_qc, key, &
-                    obs, read_format, max_obs, num_lines)
+                    obs, read_format, max_obs)
 
 ! Read in observation from file, watch for allocation of storage
 ! This RELIES on the fact that obs%values(1) is ALWAYS the observation value
@@ -3270,7 +3304,6 @@ integer,            intent(in)    :: num_qc, add_qc, key
 character(len=*),   intent(in)    :: read_format
 type(obs_type),     intent(inout) :: obs
 integer, optional,  intent(in)    :: max_obs
-integer, optional,  intent(out)    :: num_lines
 
 integer  :: i, io
 real(r8) :: temp_val
@@ -3288,7 +3321,6 @@ if(num_copies > 0) then
       end do
    else
       read(file_id, *, iostat=io) obs%values(1:num_copies)
-      num_lines = num_lines + 1
       if (io /= 0) then
          ! Read error of some type
          write(string1, *) 'Read error in obs values, rc= ', io
@@ -3309,7 +3341,6 @@ if(num_qc > 0) then
       end do
    else
       read(file_id, *, iostat=io) obs%qc(1:num_qc)
-      num_lines = num_lines + 1
       if (io /= 0) then
          ! Read error of some type
          write(string1, *) 'Read error in qc values, rc= ', io
@@ -3330,7 +3361,6 @@ if(read_format == 'unformatted') then
    read(file_id, iostat=io) obs%prev_time, obs%next_time, obs%cov_group
 else
    read(file_id, *, iostat=io) obs%prev_time, obs%next_time, obs%cov_group
-   num_lines = num_lines + 1
 endif
 if (io /= 0) then
    ! Read error of some type
