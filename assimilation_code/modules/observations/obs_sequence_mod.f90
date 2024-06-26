@@ -162,6 +162,15 @@ type obs_type_send
    real(r8) :: error_variance
 end type obs_type_send
 
+type obs_dist_type
+    integer         :: obs_size
+    integer         :: my_pe
+    integer         :: num_obs
+    integer         :: num_pes
+    integer         :: obs_pos
+    integer         :: starting_obs
+end type obs_dist_type
+
 type obs_cov_type
    private
    integer :: num_cov_groups
@@ -1275,33 +1284,9 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
 
     total_values = num_values * num_obs
     allocate(conv_set(num_obs))
+    print *, 'num_obs: ', num_obs
     allocate(values(total_values * 10))
     allocate(qc(total_values * 10))
-    ! Testing initialization
-    ! do i = 1, num_obs
-    !     conv_set(i)%key = 420
-    !     conv_set(i)%lon = 420.0
-    !     conv_set(i)%lat = 420.0
-    !     conv_set(i)%kind = 420
-    !     conv_set(i)%days = 420
-    !     conv_set(i)%vloc = 420.0
-    !     conv_set(i)%seconds = 420
-    !     conv_set(i)%prev_time = 420
-    !     conv_set(i)%next_time = 420
-    !     conv_set(i)%cov_group = 420
-    !     conv_set(i)%which_vert = 420
-    !     conv_set(i)%obs_def_key = 420
-    !     conv_set(i)%error_variance = 420.0
-    ! enddo
-    ! if (proc == 1) then
-    !     print *, 'values(1) (before recv): ', values(1)
-    !     print *, 'set(1)%values(1): ', set(1)%values(1)
-    ! endif 
-    ! if (proc == 1) then
-        ! call print_obs_send(conv_set(1))
-        ! print *, 'num_values: ', num_values
-        ! print *, 'num_obs: ', num_obs
-    ! endif
     
     ! Convert to a struct with fully contiguous memory 
     call convert_obs_set(set, conv_set, num_values, num_obs)
@@ -1326,9 +1311,9 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     ! also send values and qc
     ! KY this isn't ideal; takes way too long to communicate
     ! print *, 'total_values: ', total_values
-    call mpi_send(values, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
-    call mpi_send(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
-    call mpi_send(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, ierror)
+    call mpi_ssend(values, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    call mpi_ssend(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    call mpi_ssend(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, ierror)
     
     ! Let's try using MPI_Scatter instead! 
     ! Or perhaps use MPI_Scatterv? (fewer scatter calls)
@@ -1380,12 +1365,13 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
     call mpi_recv(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE, ierror)
     ! print *, '2'
     call mpi_recv(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE, ierror)
+    print *, 'made past mpi_recv'
     ! print *, '3'
 
     ! print *, 'set(1)%values(1) (after mpi_recv but before convert_obs_back): ', set(1)%values(1)
     ! todo: this call should convert the simplified data structure back into the more complicated one
     ! this should help us (hopefully) avoid changing too much code...?
-    ! call convert_obs_back(set, conv_set, values, qc, num_values, num_obs)
+    ! call convert_obs_back(set, conv_set, num_values, num_obs)
 
     ! print *, 'set(1)%values(1) (before start val loop): ', set(1)%values(1)
     ! print *, 'start val loop'
@@ -1398,7 +1384,7 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
     ! print *, 'end val loop'
 
     ! print *, 'set(1)%values(1) (before convert_obs_back): ', set(1)%values(1)
-    call convert_obs_back(set, conv_set, num_values, num_obs)
+    call convert_obs_back(set, conv_set, num_obs)
     ! print *, 'set(1)%key (before setting values): ', set(1)%key
 
     d = 1
@@ -1426,18 +1412,21 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
     deallocate(values)
     deallocate(qc)
     ! After send has completed, destroy the mpi struct
+    print *, 'before destroy_obs_mpi call'
     call destroy_obs_mpi(obs_mpi)
+    print *, 'after destroy_obs_mpi call'
 
 
 end subroutine recv_obs_set
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
+subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, root)
     type(obs_type),             intent(inout)      :: set(:)
     type(obs_type),             intent(inout)      :: new_set(:)
     integer,                    intent(inout)      :: num_obs_per_proc
     integer,                    intent(inout)      :: num_values
     integer,                    intent(in)      :: nprocs
+    integer,                    intent(in)      :: root
 
     type(obs_type_send), allocatable               :: conv_set(:)
     type(obs_type_send), allocatable               :: all_conv_set(:)
@@ -1450,7 +1439,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
 
     total_obs = num_obs_per_proc * nprocs
     total_values = num_values * total_obs
-    if (my_task_id() == 0) then
+    if (my_task_id() == root) then
         allocate(all_conv_set(total_obs))
     else
         allocate(all_conv_set(1))
@@ -1460,7 +1449,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
 
     all_values = total_values * 2 ! values + qc = 2
     vals_per_proc = all_values / nprocs
-    if (my_task_id() == 0) then
+    if (my_task_id() == root) then
         allocate(all_values_qc(all_values))
     else
         allocate(all_values_qc(1))
@@ -1469,7 +1458,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
     ! allocate(qc(total_values * 10))
     
     ! Convert to a struct with fully contiguous memory 
-    if (my_task_id() == 0) then
+    if (my_task_id() == root) then
         call convert_obs_set(set, all_conv_set, num_values, total_obs)
 
         ! copy values from allocatable arrays
@@ -1484,7 +1473,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
             all_values_qc(l:l+diff) = set(i)%qc(1:num_values)
             
             ! increment our offset
-            d = d + num_values
+            d = d + (num_values * 2)
         enddo 
         ! if (proc == 1) then
         !     print *, 'values(1) (before recv): ', values(1)
@@ -1506,11 +1495,11 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
     ! Let's try using MPI_Scatter instead! 
     ! Or perhaps use MPI_Scatterv? (fewer scatter calls)
     ! Test simplest possible option to determine how fast it will be (not 100% accurate distribution, but still)
-    ! call mpi_scatter(all_conv_set, num_obs_per_proc, obs_mpi, conv_set, num_obs_per_proc, obs_mpi, 0, MPI_COMM_WORLD, ierror)
-    ! call mpi_scatter(all_values_qc, vals_per_proc, MPI_REAL8, values_qc, vals_per_proc, MPI_REAL8, 0, MPI_COMM_WORLD, ierror)
+    call mpi_scatter(all_conv_set, num_obs_per_proc, obs_mpi, conv_set, num_obs_per_proc, obs_mpi, 0, MPI_COMM_WORLD, ierror)
+    call mpi_scatter(all_values_qc, vals_per_proc, MPI_REAL8, values_qc, vals_per_proc, MPI_REAL8, 0, MPI_COMM_WORLD, ierror)
 
     ! Repack obs sequence
-    ! call convert_obs_back(new_set, conv_set, num_values, num_obs_per_proc)
+    call convert_obs_back(new_set, conv_set, num_obs_per_proc)
     ! print *, 'set(1)%key (before setting values): ', set(1)%key
     ! do values_qc conversion, but in reverse
     
@@ -1533,7 +1522,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
         new_set(i)%qc(1:num_values) = values_qc(l:l+diff)
         
         ! increment our offset
-        d = d + num_values
+        d = d + (num_values * 2)
     enddo 
     
     ! After send has completed, destroy the mpi struct datatype and deallocate memory
@@ -1542,12 +1531,185 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs)
         deallocate(all_conv_set)
         deallocate(all_values_qc)
     endif
+
     deallocate(conv_set)
     deallocate(values_qc)
 
 end subroutine scatter_obs_set
 !------------------------------------------------------------------
 
+!------------------------------------------------------------------
+subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, root)
+    type(obs_type),             intent(inout)      :: set(:)
+    type(obs_type),             intent(inout)      :: new_set(:)
+    integer,                    intent(inout)      :: num_obs_per_proc
+    integer,                    intent(inout)      :: num_values
+    integer,                    intent(in)      :: nprocs
+    integer,                    intent(in)      :: root
+
+    type(obs_type_send), allocatable               :: conv_set(:)
+    type(obs_type_send), allocatable               :: all_conv_set(:)
+    ! real(r8), allocatable                          :: values(:)
+    ! real(r8), allocatable                          :: qc(:)
+    real(r8), allocatable                          :: all_values_qc(:)
+    real(r8), allocatable                          :: values_qc(:)
+    integer                                        :: total_values, all_values, vals_per_proc, total_obs
+    integer                                        :: obs_mpi, ierror, i, d, diff, j, l
+
+    total_obs = num_obs_per_proc * nprocs
+    total_values = num_values * total_obs * 2
+    allocate(conv_set(num_obs_per_proc))
+    if (my_task_id() == root) then 
+        allocate(all_conv_set(total_obs))
+        allocate(all_values_qc(total_values))
+    else
+        allocate(all_conv_set(1))
+        allocate(all_values_qc(1))
+    endif
+    ! allocate(values(total_values * 10))
+
+    vals_per_proc = total_values / nprocs
+    allocate(values_qc(vals_per_proc))
+    ! allocate(qc(total_values * 10))
+    
+    ! Convert to a struct with fully contiguous memory 
+    call convert_obs_set(set, conv_set, num_values, num_obs_per_proc)
+
+    ! copy values from allocatable arrays
+    d = 1
+    diff = num_values - 1 
+    do i = 1, num_obs_per_proc
+        ! values
+        values_qc(d:d+diff) = set(i)%values(1:num_values)
+
+        ! qc
+        l = d + num_values
+        values_qc(l:l+diff) = set(i)%qc(1:num_values)
+        
+        ! increment our offset
+        d = d + (num_values * 2)
+    enddo 
+    ! if (proc == 1) then
+    !     print *, 'values(1) (before recv): ', values(1)
+    !     print *, 'set(1)%values(1): ', set(1)%values(1)
+
+    ! Setup the dedicated data structure
+    call setup_obs_mpi(obs_mpi)
+
+    ! Send the full set to processor specified
+    ! also send values and qc
+    ! KY this isn't ideal; takes way too long to communicate
+    ! print *, 'total_values: ', total_values
+    ! call mpi_send(values, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    ! call mpi_send(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    ! call mpi_send(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, ierror)
+    
+    ! Let's try using MPI_Scatter instead! 
+    ! Or perhaps use MPI_Scatterv? (fewer scatter calls)
+    ! Test simplest possible option to determine how fast it will be (not 100% accurate distribution, but still)
+    ! will likely use padding to guarantee all obs and reals are sent 
+    ! call mpi_scatter(all_conv_set, num_obs_per_proc, obs_mpi, conv_set, num_obs_per_proc, obs_mpi, 0, MPI_COMM_WORLD, ierror)
+    ! call mpi_scatter(all_values_qc, vals_per_proc, MPI_REAL8, values_qc, vals_per_proc, MPI_REAL8, 0, MPI_COMM_WORLD, ierror)
+
+    call mpi_gather(conv_set, num_obs_per_proc, obs_mpi, all_conv_set, num_obs_per_proc, obs_mpi, root, MPI_COMM_WORLD, ierror)
+    call mpi_gather(values_qc, vals_per_proc, MPI_REAL8, all_values_qc, vals_per_proc, MPI_REAL8, root, MPI_COMM_WORLD, ierror)
+
+    if (my_task_id() == root) then
+        ! Repack obs sequence
+        call convert_obs_back(new_set, all_conv_set, total_obs)
+        ! print *, 'set(1)%key (before setting values): ', set(1)%key
+        ! do values_qc conversion, but in reverse
+        
+        d = 1
+        diff = num_values - 1 
+        do i = 1, num_obs_per_proc
+            ! make sure arrays are allocated
+            if (.not. allocated(new_set(i)%values)) then
+                allocate(new_set(i)%values(num_values))
+            endif
+            if (.not. allocated(new_set(i)%qc)) then
+                allocate(new_set(i)%qc(num_values))
+            endif
+
+            ! values
+            new_set(i)%values(1:num_values) = all_values_qc(d:d+diff)
+
+            ! qc
+            l = d + num_values
+            new_set(i)%qc(1:num_values) = all_values_qc(l:l+diff)
+            
+            ! increment our offset
+            d = d + (num_values * 2)
+        enddo 
+    endif
+    
+    ! After send has completed, destroy the mpi struct datatype and deallocate memory
+    call destroy_obs_mpi(obs_mpi)
+    if (my_task_id() == root) then
+        deallocate(all_conv_set)
+        deallocate(all_values_qc)
+    endif
+
+    deallocate(conv_set)
+    deallocate(values_qc)
+
+end subroutine gather_obs_set
+!------------------------------------------------------------------
+
+!------------------------------------------------------------------
+subroutine p2p_gather_obs_set(set, total_obs, num_values, root, start_pe, end_pe)
+    type(obs_type),                 intent(inout)       :: set(:)
+    integer,                        intent(inout)       :: num_values
+    integer,                        intent(in)          :: total_obs
+    integer,                        intent(in)          :: root
+    integer,                        intent(in)          :: start_pe, end_pe
+    integer                                             :: obs_per_proc, rem, my_pe, num_send, i, curr_obs, j, ierror, nprocs
+
+    nprocs = (end_pe - start_pe) + 1
+    obs_per_proc = total_obs / nprocs
+    if (my_task_id() == 0) print *, 'obs_per_proc: ', obs_per_proc
+    if (my_task_id() == 0) print *, 'nprocs: ', nprocs
+    rem = modulo(total_obs, nprocs)
+    my_pe = my_task_id()
+    num_send = obs_per_proc
+
+    do i = 0, task_count() - 1
+        ! if (my_task_id() == 0) print *, 'i: ', i
+        if (i >= start_pe .and. i <= end_pe) then
+            if (my_task_id() == root) then
+                curr_obs = 1
+                j = 0
+                do while (j < i)
+                    if (j < rem) then
+                        curr_obs = curr_obs + obs_per_proc + 1
+                    else
+                        curr_obs = curr_obs + obs_per_proc
+                    endif
+                    j = j + 1
+                enddo
+                if (i < rem) then
+                    num_send = num_send + 1
+                endif
+                print *, 'attempting to recv'
+                call recv_obs_set(set(curr_obs:curr_obs+num_send-1), i, num_send, num_values)
+            else if (my_pe == i) then
+                if (my_pe < rem) then
+                    num_send = num_send + 1
+                endif
+                print *, 'attempting to send'
+                call send_obs_set(set(1:num_send), root, num_send, num_values)
+            endif
+        endif
+        call mpi_barrier(MPI_COMM_WORLD, ierror)
+    enddo
+
+    ! call mpi_barrier(MPI_COMM_WORLD, ierror)
+
+
+
+
+end subroutine p2p_gather_obs_set
+!------------------------------------------------------------------
 
 !------------------------------------------------------------------
 subroutine recv_obs(obs, proc)
@@ -1635,10 +1797,10 @@ end subroutine print_obs_send
 !------------------------------------------------------------------
 
 !------------------------------------------------------------------
-subroutine convert_obs_back(recv, simple_obs, num_values, num_obs)
+subroutine convert_obs_back(recv, simple_obs, num_obs)
     type(obs_type),         intent(out)  :: recv(:)
     type(obs_type_send),    intent(in) :: simple_obs(:)
-    integer,          intent(in)  :: num_values
+    ! integer,          intent(in)  :: num_values
     integer,          intent(in)  :: num_obs
 
     integer :: i, d, j, seconds, days
@@ -1715,15 +1877,78 @@ end subroutine get_job_info
 !------------------------------------------------------------------
 
 !------------------------------------------------------------------
-subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, obs_per_this_proc)
+subroutine allocate_obs_set(buffer, size, num_values)
+    type(obs_type), allocatable,    intent(inout)       :: buffer(:)
+    integer,                        intent(in)          :: size
+    integer,                        intent(in)          :: num_values
+    integer                                             :: i, m
+    real(r8)                                            :: k, j, l
+
+    ! m = -1
+    ! k = 0.0
+    ! j = 0.0
+    ! l = 0.0
+    allocate(buffer(size))
+    do i = 1, size
+        allocate(buffer(i)%values(num_values))
+        allocate(buffer(i)%qc(num_values))
+        ! call set_obs_def_location(buffer(i)%def, set_location(k, j, l, m))
+    enddo
+
+end subroutine allocate_obs_set
+!------------------------------------------------------------------
+
+!------------------------------------------------------------------
+subroutine deallocate_obs_set(buffer, size, num_values)
+    type(obs_type), allocatable,            intent(inout)       :: buffer(:)
+    integer,                                intent(in)          :: size
+    integer,                                intent(in)          :: num_values
+    integer                                                     :: i
+
+    do i = 1, size
+        deallocate(buffer(i)%values)
+        deallocate(buffer(i)%qc)
+    enddo
+    deallocate(buffer)
+
+end subroutine deallocate_obs_set
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+subroutine sort_roundrobin(buffer, new_buffer, num_obs, num_procs)
+    type(obs_type),             intent(in)       :: buffer(:)
+    integer,                    intent(in)       :: num_procs, num_obs
+    type(obs_type),             intent(out)      :: new_buffer(:)
+    integer                                      :: i, j, obs_per_proc, rem
+    
+    obs_per_proc = num_obs / num_procs
+    rem = modulo(num_obs, num_procs)
+
+    do i = 1, num_procs
+        do j = 1, obs_per_proc
+            new_buffer(i*j) = buffer((j*obs_per_proc) + i)
+        enddo
+    enddo 
+
+    if (rem > 0) then
+        do i = 1, rem
+            new_buffer((obs_per_proc * (i + 1)) - 1) = buffer((obs_per_proc * (i + 1)) - 1) 
+        enddo 
+    endif
+
+
+
+end subroutine sort_roundrobin
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, obs_per_this_proc, num_alloc)
     integer,            intent(in)          :: obs_size
     integer,            intent(in)          :: my_pe
     integer,            intent(in)          :: num_obs 
     integer,            intent(in)          :: num_pes
     integer(i8),        intent(in)          :: start_pos
     integer(i8),        intent(out)         :: obs_pos
-    integer,            intent(out)         :: starting_obs, obs_per_this_proc
-    integer                                 :: rem, i, obs_with_rem
+    integer,            intent(out)         :: starting_obs, obs_per_this_proc, num_alloc
+    integer                                 :: rem, i, obs_with_rem, obs_per_proc
 
     obs_per_proc = num_obs / num_pes
     rem = modulo(num_obs, num_pes)
@@ -1742,10 +1967,12 @@ subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos
     enddo
 
     if (my_pe < rem) then
-        obs_per_this_proc = obs_per_proc
-    else
         obs_per_this_proc = obs_with_rem
+    else
+        obs_per_this_proc = obs_per_proc
     endif
+    
+    num_alloc = obs_with_rem
 
     
 end subroutine calc_obs_params
@@ -1775,9 +2002,32 @@ subroutine get_obs_size(file_id, obs_size, num_values, init_pos)
     final_pos = ftell(file_id)
     obs_size = final_pos - init_pos
 
+    deallocate(test_obs%values)
+    deallocate(test_obs%qc)
+
 end subroutine get_obs_size
 !------------------------------------------------------------------
 
+!------------------------------------------------------------------
+subroutine sort_obs_by_time(obs_set, new_obs_set)
+    ! todo: make this sort in-place; too much memory used currently
+    ! need to allocate two massive arrays
+    type(obs_type),             intent(inout)       :: obs_set(:)
+    type(obs_type),             intent(inout)       :: new_obs_set(:)
+    type(obs_type)                                  :: old_obs
+    integer                                         :: i, next_time, j
+
+    i = 1
+    j = 1
+    do while (i /= -1)
+        new_obs_set(j) = obs_set(i)
+        i = obs_set(i)%next_time
+        j = j + 1
+    enddo
+
+end subroutine sort_obs_by_time
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine read_obs_seq(file_name, add_copies, add_qc, add_obs, seq)
 
 ! Be able to increase size at read in time for efficiency
@@ -1788,13 +2038,18 @@ type(obs_sequence_type), intent(out) :: seq
 
 integer :: i, num_copies, num_qc, num_obs, max_num_obs, file_id, io, num_obs_per_proc, rem, mpi_num, num_alloc, num_to_send, my_pe
 type(obs_type), allocatable :: buffer(:)
+type(obs_type), target, allocatable :: full_buf(:)
+type(obs_type), allocatable :: full_buf_ordered(:)
+type(obs_type), allocatable :: full_buf_rr(:)
 type(obs_type), allocatable :: ordered_buf(:)
 type(obs_type), allocatable :: my_ordered_buf(:)
-type(obs_type) :: test_obs
+type(obs_type), pointer     :: buf_ptr(:)
+type(obs_dist_type)         :: dist_md
+!type(obs_type) :: test_obs
 !type(obs_type), allocatable :: ordered(:)
 integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
 integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe
-integer :: num_offset_pes, my_pe_orig, mpi_num_orig
+integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc
 integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos 
 character(len=16) :: label(2)
 character(len=32) :: read_format
@@ -1818,8 +2073,6 @@ total_obs = num_obs
 ! How about PBS_SELECT?
 ! num_split = 8 ! maybe don't hardcode this?
 
-
-
 ! Check number of processes and divide obs number to build blocks of obs
 mpi_num = task_count()
 num_obs_per_proc = total_obs / mpi_num
@@ -1827,34 +2080,14 @@ rem = modulo(total_obs, mpi_num)
 num_alloc = num_obs_per_proc + 1
 my_pe = my_task_id()
 
+! Get number of threads and nodes
 call get_job_info(nthreads, nnodes)
-if (my_pe == 0) then
-    print *, 'nthreads: ', nthreads
-    print *, 'nnodes: ', nnodes
-endif
 
 ! obs_per_proc = total_obs / num_split
 ! allocate memory into a buffer
 ! only allocate a buffer for all obs on the first process
 ! this includes the ordered buffer
 ! otherwise, only allocate the ordered buffer, and with num_alloc
-if (my_pe < num_split) then
-    allocate(buffer(obs_per_proc))
-    allocate(ordered_buf(obs_per_proc))
-    do i = 1, total_obs / num_split
-        allocate(buffer(i)%values(total_copies))
-        allocate(buffer(i)%qc(total_copies))
-        allocate(ordered_buf(i)%values(total_copies))
-        allocate(ordered_buf(i)%qc(total_copies))
-    enddo
-endif
-
-! ALL processes allocate their own bespoke buffer
-allocate(my_ordered_buf(num_alloc))
-do i = 1, num_alloc
-    allocate(my_ordered_buf(i)%values(total_copies))
-    allocate(my_ordered_buf(i)%qc(total_copies))
-enddo
 
 !allocate(ordered(num_alloc))
 ! Let's try only allocating limited amounts of memory...for testing purposes
@@ -1916,22 +2149,41 @@ endif
 
 ! Offset my_pe so that we can conserve space on the first node
 ! (currently) assuming that we are using more than a single node
-my_pe_orig = my_pe
-mpi_num_orig = mpi_num
-my_pe = my_pe - nthreads
-mpi_num = mpi_num - nthreads
+! my_pe_orig = my_pe
+! mpi_num_orig = mpi_num
+shifted_pe = my_pe - nthreads
+shifted_nprocs = mpi_num - nthreads
 
 ! Get byte size of each obs
 call get_obs_size(file_id, obs_size, total_copies, init_pos)
+if (my_task_id() == 0) then
+    print *, 'obs_size: ', obs_size
+endif
 
 ! Determine num obs per procs and starting obs
-call calc_obs_params(obs_size, my_pe, mpi_num, num_obs, init_pos, obs_pos, lower_bound, split_obs)
+call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, num_obs, init_pos, obs_pos, lower_bound, split_obs, shifted_alloc)
+if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 
+! Allocate our buffers
+if (my_task_id() == 0) then
+    ! allocate(full_buf(num_alloc * task_count())
+    ! call allocate_obs_set(full_buf, num_alloc*task_count(), total_copies)
+    call allocate_obs_set(full_buf, num_obs, total_copies)
+endif
+if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
+if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
+call allocate_obs_set(buffer, split_obs, total_copies)
+! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
+! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
+
+! Seek the obs position
 io = fseek(file_id, obs_pos, 0) 
+
+! todo: need to check for errors after this
 
 ! Read all of the observations using all procs except for those on the first node
 x = lower_bound
-if (my_pe >= 0) then
+if (shifted_pe >= 0) then
     ! print *, 'hi!'
     ! do j = 1, num_obs
     do j = 1, split_obs
@@ -1940,17 +2192,14 @@ if (my_pe >= 0) then
        ! if (j > upper_bound) exit
        ! if (j >= lower_bound .and. j <= upper_bound) then
            ! x = modulo(j, split_obs)
-           ! if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
-           ! if (io /= 0) then
-           !    ! Read error of some type
-           !    write(string1, *) 'Read error in obs label', i, ' rc= ', io
-           !    call error_handler(E_ERR, 'read_obs_seq', string1, source)
-           ! endif
+           if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
+           if (io /= 0) then
+              ! Read error of some type
+              write(string1, *) 'Read error in obs label', i, ' rc= ', io
+              call error_handler(E_ERR, 'read_obs_seq', string1, source)
+           endif
            call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
               read_format, total_obs)
-          ! if (j == 1) then
-          !     print *, 'values(1): ', buffer(j)%values(1), ' from proc : ', my_pe, ' offset: ', obs_pos, 'key: ', x
-          ! endif
         ! Also set the key in the obs
         ! Make sure the key is absolute, not relative to the observations being read by this proc
            buffer(j)%key = x
@@ -1968,7 +2217,67 @@ if (my_pe >= 0) then
     enddo
 endif
 
-! call mpi_barrier(MPI_COMM_WORLD, ierror)
+call mpi_barrier(MPI_COMM_WORLD, ierror)
+
+if (my_task_id() == 0) print *, 'Made it to gather'
+
+! Should I rewrite this to use point-to-point ops
+! would require less to no padding; easier to send remainder
+! maybe write p2p_gather function?
+! call gather_obs_set(buffer, full_buf, num_alloc, num_copies, task_count(), 0)
+if (my_task_id() == 0) then
+    print *, 'hi from proc 0'
+    call p2p_gather_obs_set(full_buf, num_obs, num_copies, 0, 0+nthreads, task_count() - 1)
+else
+    call p2p_gather_obs_set(buffer, num_obs, num_copies, 0, 0+nthreads, task_count() - 1)
+endif
+
+if (my_task_id() == 0) print *, 'Made it past gather'
+
+! verify that this works before moving further
+! also verify that the values correspond to what is expected
+
+! num_alloc = (num_obs / task_count())
+! rem = modulo(num_obs, task_count())
+! if (rem > 0) num_alloc = num_alloc + 1
+
+! if (my_task_id() == 0) then
+!     buf_ptr => full_buf((nthreads*num_alloc)+1:)
+!     call allocate_obs_set(full_buf_ordered, task_count()*num_alloc, num_copies)
+!
+!     ! Issue: this is not in-place; may take up too much storage
+!     ! (need two arrays of about the same size)
+!     call sort_obs_by_time(buf_ptr, full_buf_ordered)
+!
+!     ! reset the pointer and deallocate the buffer
+!     buf_ptr => NULL()
+!     call deallocate_obs_set(full_buf, num_alloc * task_count(), num_copies)
+!
+!     ! copy 
+!     ! this should be handled by scatter
+!     ! my_ordered_buf(1:num_alloc) = full_buf_ordered(1:num_alloc)
+!
+!     num_alloc = num_obs / task_count()
+!     call allocate_obs_set(full_buf_rr, task_count()*num_alloc, num_copies)
+!
+!     ! todo: round-robin sort these values
+!     ! another todo: try to do this in place as well
+!     call sort_roundrobin(full_buf, full_buf_rr, num_obs, task_count())
+!
+!     ! end todo
+!
+!     my_pe = my_pe_orig
+!     mpi_num = mpi_num_orig
+!     ! round-robin distribution of values
+!
+! else
+!     allocate(full_buf_ordered(1))
+! endif
+!
+! call allocate_obs_set(my_ordered_buf, num_alloc + 1, num_copies)
+! call scatter_obs_set(full_buf_ordered, my_ordered_buf, num_alloc, num_copies, task_count(), 0)
+!
+
 !
 ! ! for testing purposes
 ! actual_obs = total_obs - rem
