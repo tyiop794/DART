@@ -21,7 +21,9 @@ module obs_sequence_mod
 ! copy subroutines. USERS MUST BE VERY CAREFUL TO NOT DO DEFAULT ASSIGNMENT
 ! FOR THESE TYPES THAT HAVE COPY SUBROUTINES.
 use mpi
-use ifport
+use ifport, only:fseek, ftell
+! use share_type
+use iso_c_binding
 
 use        types_mod, only : r8, i8, MISSING_R8, metadatalength
 
@@ -65,8 +67,6 @@ end interface
 interface operator(/=)
    module procedure ne_obs
 end interface
-
-
 
 ! Public interfaces for obs sequences
 public :: obs_sequence_type, init_obs_sequence, interactive_obs_sequence, &
@@ -128,7 +128,6 @@ type obs_type
 end type obs_type
 
 type obs_type_send
-    private
 ! The key is needed to indicate the element number in the storage for the obs_sequence
 ! Do I want to enforce the identity of the particular obs_sequence?
 ! Declare a simplified data structure for sending and receiving using MPI
@@ -156,6 +155,7 @@ type obs_type_send
    ! todo: We can't do that when we're parallelizing; think of something better
    integer :: prev_time, next_time
    integer :: cov_group
+   integer :: time_order
    real(r8) :: lon
    real(r8) :: lat
    real(r8) :: vloc
@@ -175,6 +175,23 @@ type obs_cov_type
    private
    integer :: num_cov_groups
 end type obs_cov_type
+
+type obs_values_qc_type
+   integer :: time_order
+   real(r8) :: val
+   real(r8) :: qc
+end type obs_values_qc_type
+
+interface
+    subroutine qsort(array, elem_count, elem_size, compare) bind(C, name="qsort")
+        import
+        type(c_ptr), value :: array
+        integer(c_size_t), value :: elem_count
+        integer(c_size_t), value :: elem_size
+        type(c_funptr), value   :: compare !int(*compare)(const void *, const void *)
+    end subroutine qsort
+
+end interface
 
 ! for errors
 character(len=512) :: string1, string2, string3
@@ -1222,20 +1239,30 @@ subroutine destroy_obs_mpi(mpi_obstype)
     call mpi_type_free(mpi_obstype, ierror)
 end subroutine destroy_obs_mpi
 !------------------------------------------------------------------
-subroutine setup_obs_mpi(mpi_obstype)
+subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     integer,                    intent(inout)    :: mpi_obstype
+    integer,                    intent(inout)    :: mpi_valstype
     integer :: rank, nprocs, ierror, i, num_ints, num_vars, num_doubles, num_logicals
-    integer(MPI_ADDRESS_KIND) :: offsets(13)
-    integer(MPI_ADDRESS_KIND) :: address(13)
-    integer :: oldtypes(13)
-    integer :: bl_var(13) 
+    integer :: num_vars_vals, num_ints_vals, num_doubles_vals
+    integer(MPI_ADDRESS_KIND) :: offsets(14), offsets_vals(3)
+    integer(MPI_ADDRESS_KIND) :: address(14), address_vals(3)
+    integer :: oldtypes(14), oldtypes_vals(3)
+    integer :: bl_var(14), bl_var_vals(3)
     type(obs_type_send) :: initial
+    type(obs_values_qc_type) :: init_val
 
-    num_ints = 9 
+    ! for obs_type_send
+    num_ints = 10 
     num_doubles = 4
     num_logicals = 0
-    num_vars = 13
-    bl_var(1:13) = 1 
+    num_vars = 14
+    bl_var(1:14) = 1 
+
+    ! for  obs_values_qc_type
+    num_ints_vals = 1
+    num_doubles_vals = 2
+    num_vars_vals = 3
+    bl_var_vals(1:3) = 1
 
     ! get the addresses of every variable; will let us calculate the displacement
     call mpi_get_address(initial, address(1), ierror)
@@ -1247,14 +1274,24 @@ subroutine setup_obs_mpi(mpi_obstype)
     call mpi_get_address(initial%prev_time, address(7), ierror)
     call mpi_get_address(initial%next_time, address(8), ierror)
     call mpi_get_address(initial%cov_group, address(9), ierror)
-    call mpi_get_address(initial%lon, address(10), ierror)
-    call mpi_get_address(initial%lat, address(11), ierror)
-    call mpi_get_address(initial%vloc, address(12), ierror)
-    call mpi_get_address(initial%error_variance, address(13), ierror)
+    call mpi_get_address(initial%time_order, address(10), ierror)
+    call mpi_get_address(initial%lon, address(11), ierror)
+    call mpi_get_address(initial%lat, address(12), ierror)
+    call mpi_get_address(initial%vloc, address(13), ierror)
+    call mpi_get_address(initial%error_variance, address(14), ierror)
+
+    ! also do this for values_qc derived type
+    call mpi_get_address(init_val, address_vals(1), ierror)
+    call mpi_get_address(init_val%val, address_vals(2), ierror)
+    call mpi_get_address(init_val%qc, address_vals(3), ierror)
 
     ! define types in struct in terms of base MPI datatypes
     oldtypes(1:num_ints) = MPI_INTEGER
     oldtypes(num_ints+1:num_ints+num_doubles) = MPI_REAL8
+
+    ! same with values_qc
+    oldtypes_vals(1:num_ints_vals) = MPI_INTEGER
+    oldtypes_vals(num_ints_vals+1:num_ints_vals+num_doubles_vals) = MPI_REAL8
 
     ! set the offsets of each of the variables from the first
     offsets(1) = 0
@@ -1262,9 +1299,18 @@ subroutine setup_obs_mpi(mpi_obstype)
         offsets(i) = address(i) - address(1)
     enddo 
 
-    ! Commit the new data type
+    ! you know the drill...
+    offsets_vals(1) = 0
+    do i = 2, num_vars_vals
+        offsets_vals(i) = address_vals(i) - address_vals(1)
+    enddo 
+
+    ! Commit the new data types
     call mpi_type_create_struct(num_vars, bl_var, offsets, oldtypes, mpi_obstype, ierror)
     call mpi_type_commit(mpi_obstype, ierror)
+
+    call mpi_type_create_struct(num_vars_vals, bl_var_vals, offsets_vals, oldtypes_vals, mpi_valstype, ierror)
+    call mpi_type_commit(mpi_valstype, ierror)
 
 end subroutine setup_obs_mpi
 !------------------------------------------------------------------
@@ -1305,7 +1351,7 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     ! endif 
 
     ! Setup the dedicated data structure
-    call setup_obs_mpi(obs_mpi)
+    ! call setup_obs_mpi(obs_mpi)
 
     ! Send the full set to processor specified
     ! also send values and qc
@@ -1355,7 +1401,7 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
     ! call convert_obs_set(set, conv_set, values, qc, num_values, num_obs)
 
     ! Setup the dedicated data structure
-    call setup_obs_mpi(obs_mpi)
+    ! call setup_obs_mpi(obs_mpi)
     ! Retrieve the full set from proc specified
     ! also retrieve values and qc
     ! print *, 'trying to receive observations' 
@@ -1483,7 +1529,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     endif
 
     ! Setup the dedicated data structure
-    call setup_obs_mpi(obs_mpi)
+    ! call setup_obs_mpi(obs_mpi)
 
     ! Send the full set to processor specified
     ! also send values and qc
@@ -1552,11 +1598,14 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     type(obs_type_send), allocatable               :: all_conv_set(:)
     ! real(r8), allocatable                          :: values(:)
     ! real(r8), allocatable                          :: qc(:)
-    real(r8), allocatable                          :: all_values_qc(:)
-    real(r8), allocatable                          :: values_qc(:)
+    ! real(r8), allocatable                          :: all_values_qc(:)
+    ! real(r8), allocatable                          :: values_qc(:)
+    type(obs_values_qc_type), allocatable          :: all_values_qc(:)
+    type(obs_values_qc_type), allocatable          :: values_qc(:)
     integer                                        :: total_values, all_values, vals_per_proc, total_obs, obs_per_proc, rem, &
         gather_procs, gather_obs_per_proc, gather_vals_per_proc
-    integer                                        :: obs_mpi, ierror, i, d, diff, j, l, actual_proc, gather_proc
+    integer                                        :: obs_mpi, ierror, i, d, diff, j, l, actual_proc, gather_proc, &
+        vals_mpi
     integer, allocatable                           :: disp(:), count(:), disp_vals(:), count_vals(:)
 
 
@@ -1565,7 +1614,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     gather_obs_per_proc = num_obs / gather_procs
     obs_per_proc = num_obs / nprocs
     rem = modulo(num_obs, gather_procs)
-    total_values = num_values * num_obs * 2
+    total_values = num_values * num_obs
     if (gather_proc < rem) gather_obs_per_proc = gather_obs_per_proc + 1
     allocate(conv_set(gather_obs_per_proc))
     if (my_task_id() == root) then 
@@ -1577,9 +1626,9 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     endif
     ! allocate(values(total_values * 10))
 
-    gather_vals_per_proc = total_values / gather_procs
-    vals_per_proc = total_values / nprocs
-    if (gather_proc < rem) gather_vals_per_proc = gather_vals_per_proc + (num_values * 2)
+    gather_vals_per_proc = num_values * gather_obs_per_proc
+    ! vals_per_proc = total_values / nprocs
+    ! if (gather_proc < rem) gather_vals_per_proc = gather_vals_per_proc + (num_values)
     allocate(values_qc(gather_vals_per_proc))
     ! allocate(qc(total_values * 10))
     
@@ -1591,21 +1640,26 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     diff = num_values - 1 
     do i = 1, gather_obs_per_proc
         ! values
-        values_qc(d:d+diff) = set(i)%values(1:num_values)
+        ! values_qc(d:d+diff) = set(i)%values(1:num_values)
+        do j = 1, num_values
+            values_qc(j+d-1)%val = set(i)%values(j)
+            values_qc(j+d-1)%qc = set(i)%qc(j)
+        enddo
+        ! values_qc(d:d+diff)%qc = set(i)%qc(1:num_values)
 
         ! qc
-        l = d + num_values
-        values_qc(l:l+diff) = set(i)%qc(1:num_values)
+        ! l = d + num_values
+        ! values_qc(l:l+diff) = set(i)%qc(1:num_values)
         
         ! increment our offset
-        d = d + (num_values * 2)
+        d = d + (num_values)
     enddo 
     ! if (proc == 1) then
     !     print *, 'values(1) (before recv): ', values(1)
     !     print *, 'set(1)%values(1): ', set(1)%values(1)
 
     ! Setup the dedicated data structure
-    call setup_obs_mpi(obs_mpi)
+    call setup_obs_mpi(obs_mpi, vals_mpi)
     
     ! prepare the gatherv; allocate displacement and count arrays
     allocate(disp(nprocs))
@@ -1643,7 +1697,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     count_vals(1:start_proc) = 0
     do i = 0, gather_procs - 1
         actual_proc = start_proc + 1 + i
-        count_vals(actual_proc) = num_values * count(actual_proc) * 2
+        count_vals(actual_proc) = num_values * count(actual_proc)
     enddo
 
     disp_vals(1:start_proc) = 0
@@ -1665,12 +1719,18 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     call mpi_gatherv(conv_set, count(my_task_id()+1), obs_mpi, all_conv_set, count, disp, &
         obs_mpi, root, MPI_COMM_WORLD, ierror)
 
-    call mpi_gatherv(values_qc, count_vals(my_task_id()+1), MPI_REAL8, all_values_qc, count_vals, disp_vals, &
-        MPI_REAL8, root, MPI_COMM_WORLD, ierror)
+    call mpi_gatherv(values_qc, count_vals(my_task_id()+1), vals_mpi, all_values_qc, count_vals, disp_vals, &
+        vals_mpi, root, MPI_COMM_WORLD, ierror)
 
-    if (my_task_id() == root) print *, 'after gather'
+    if (my_task_id() == root) then 
+        print *, 'after gather'
+        call sort_obs_send_by_time(all_conv_set, all_values_qc, num_values, num_obs)
+        print *, 'sorted by time (timestamp added)'
+    endif
 
+    call mpi_barrier(MPI_COMM_WORLD, ierror)
     ! todo: sort by time, organize roundrobin, and scatter
+    ! todo: maybe scatter roundrobin using point to point ops?
     ! todo: figure out how to sort in-place rather than using an additional array
     ! Send the full set to processor specified
     ! also send values and qc
@@ -1788,7 +1848,7 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
     !     print *, 'set(1)%values(1): ', set(1)%values(1)
 
     ! Setup the dedicated data structure
-    call setup_obs_mpi(obs_mpi)
+    ! call setup_obs_mpi(obs_mpi)
     
     call mpi_barrier(MPI_COMM_WORLD, ierror)
     ! Send the full set to processor specified
@@ -2153,9 +2213,39 @@ subroutine sort_roundrobin(buffer, new_buffer, num_obs, num_procs)
         enddo 
     endif
 
-
-
 end subroutine sort_roundrobin
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+subroutine sort_roundrobin_inplace(buffer, new_buffer, num_obs, num_procs)
+    type(obs_type),             intent(in)       :: buffer(:)
+    integer,                    intent(in)       :: num_procs, num_obs
+    type(obs_type),             intent(out)      :: new_buffer(:)
+    integer                                      :: i, j, obs_per_proc, rem, k
+    
+    obs_per_proc = num_obs / num_procs
+    rem = modulo(num_obs, num_procs)
+
+    k = 0
+    print *, 'num_procs: ', num_procs
+    print *, 'obs_per_proc: ', obs_per_proc
+    do i = 1, num_procs
+        do j = i, obs_per_proc
+            ! print *, '(', i, ',', j, ')'
+            if (buffer(((i-1)*obs_per_proc) + j)%key == 0 .and. k == 0) then
+                print *, ' 0 key was found at obs ', ((i - 1) * obs_per_proc) + j
+                k = 1
+            endif
+            new_buffer(i*j) = buffer(((i-1)*obs_per_proc) + j)
+        enddo
+    enddo 
+
+    if (rem > 0) then
+        do i = 1, rem
+            new_buffer((obs_per_proc * (i + 1)) - 1) = buffer((obs_per_proc * (i + 1)) - 1) 
+        enddo 
+    endif
+
+end subroutine sort_roundrobin_inplace
 !------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, obs_per_this_proc, num_alloc, rem)
@@ -2226,7 +2316,80 @@ subroutine get_obs_size(file_id, obs_size, num_values, init_pos)
 
 end subroutine get_obs_size
 !------------------------------------------------------------------
+!------------------------------------------------------------------
+function compare_obs(obs1, obs2) Bind(C)
+    type(obs_type_send),       intent(in)       :: obs1, obs2 
+    integer(c_int)                              :: compare_obs
 
+    if (obs1%time_order < obs2%time_order) then
+        compare_obs = -1
+    else if (obs1%time_order > obs2%time_order) then
+        compare_obs = 1
+    else
+        compare_obs = 0
+    endif
+
+end function compare_obs
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+function compare_vals(val1, val2) Bind(C)
+    type(obs_values_qc_type),       intent(in)      :: val1, val2 
+    integer(c_int)                                  :: compare_vals
+
+    if (val1%time_order < val2%time_order) then
+        compare_vals = -1
+    else if (val1%time_order > val2%time_order) then
+        compare_vals = 1
+    else
+        compare_vals = 0
+    endif
+
+end function compare_vals
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
+    ! todo: make this sort in-place; too much memory used currently
+    ! need to allocate two massive arrays
+    type(obs_type_send), target,        intent(inout)       :: obs_set(num_obs)
+    type(obs_values_qc_type), target,   intent(inout)       :: values_qc(num_obs * num_values)
+    integer,                            intent(in)          :: num_values, num_obs
+    integer                                                 :: i, next_time, j, k, val_idx, x, total_values
+    integer(C_SIZE_T)                                       :: num_obs_c, total_vals_c, sizeof_val, sizeof_obs
+    ! integer                                                 :: test(4), test_2(4), 
+
+    i = 1
+    j = 1
+    k = 1
+    do while (i /= -1)
+        obs_set(i)%time_order = j 
+        ! obs_set(i)%time_order = num_obs - j
+
+        ! need to deal with values_qc as well
+        val_idx = ((i - 1) * num_values) + 1
+        do x = val_idx, (val_idx + num_values) - 1
+            values_qc(x)%time_order = k
+            ! values_qc(x)%time_order = (num_obs * num_values) - k 
+            k = k + 1
+        enddo 
+
+        ! move indices
+        i = obs_set(i)%next_time
+        j = j + 1
+    enddo
+
+    total_values = num_obs * num_values
+    total_vals_c = total_values
+    num_obs_c = num_obs
+    sizeof_val = sizeof(values_qc(1))
+    sizeof_obs = sizeof(obs_set(1))
+
+    call qsort(c_loc(obs_set(1)), int(num_obs, c_size_t), sizeof_obs, c_funloc(compare_obs))
+    call qsort(c_loc(values_qc(1)), int(num_obs, c_size_t), sizeof_val, c_funloc(compare_vals))
+    
+
+
+end subroutine sort_obs_send_by_time
+!------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine sort_obs_by_time(obs_set, new_obs_set)
     ! todo: make this sort in-place; too much memory used currently
