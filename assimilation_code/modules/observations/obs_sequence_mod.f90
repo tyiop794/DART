@@ -1584,24 +1584,68 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
 
 end subroutine scatter_obs_set
 !------------------------------------------------------------------
+!------------------------------------------------------------------
+subroutine scatter_obs_varied(dest, src, dest_val, src_val, obs_mpi, val_mpi, num_values, num_obs, num_procs)
+    integer,                     intent(in)         :: obs_mpi, val_mpi, num_values, num_procs, num_obs
+    type(obs_type_send),          intent(inout)      :: dest(:), src(:)
+    type(obs_values_qc_type),          intent(inout)      :: dest_val(:), src_val(:)
+    integer                                         :: obs_per_proc, rem, i, j, k, ierror, vals_per_proc
+    integer , allocatable                                        :: disp(:), disp_vals(:), count(:), count_vals(:)
 
+    obs_per_proc = num_obs / num_procs
+    vals_per_proc = obs_per_proc * num_values
+    rem = modulo(num_obs, num_procs)
+
+    allocate(disp(num_procs))
+    allocate(disp_vals(num_procs))
+    allocate(count(num_procs))
+    allocate(count_vals(num_procs))
+
+    do i = 1, num_procs
+        count(i) = obs_per_proc 
+        count_vals(i) = (obs_per_proc) * num_values
+        if (i <= rem) then
+            count(i) = count(i) + 1
+            count_vals(i) = count_vals(i) + num_values
+        endif
+    enddo
+
+    disp(1) = 0
+    disp_vals(1) = 0
+    do i = 2, num_procs
+        disp(i) = disp(i - 1) + count(i - 1)
+        disp_vals(i) = disp_vals(i - 1) + count_vals(i - 1)
+    enddo
+
+    call mpi_scatterv(src, count, disp, obs_mpi, dest, count(my_task_id() + 1), obs_mpi, 0, MPI_COMM_WORLD, ierror)
+    call mpi_scatterv(src_val, count_vals, disp_vals, val_mpi, dest_val, count_vals(my_task_id() + 1), val_mpi, 0, MPI_COMM_WORLD, &
+    ierror)
+
+    deallocate(disp)
+    deallocate(disp_vals)
+    deallocate(count)
+    deallocate(count_vals)
+
+
+end subroutine scatter_obs_varied
+!------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_proc)
-    type(obs_type),             intent(inout)      :: set(:)
-    type(obs_type),             intent(inout)      :: new_set(:)
+    type(obs_type), allocatable,            intent(inout)      :: set(:)
+    type(obs_type), allocatable,           intent(inout)      :: new_set(:)
     integer,                    intent(inout)      :: num_obs
     integer,                    intent(inout)      :: num_values
     integer,                    intent(in)      :: nprocs
     integer,                    intent(in)      :: root, start_proc
 
-    type(obs_type_send), allocatable               :: conv_set(:)
+    type(obs_type_send), allocatable               :: conv_set(:), new_conv_set(:)
     type(obs_type_send), allocatable               :: all_conv_set(:)
     ! real(r8), allocatable                          :: values(:)
     ! real(r8), allocatable                          :: qc(:)
     ! real(r8), allocatable                          :: all_values_qc(:)
     ! real(r8), allocatable                          :: values_qc(:)
     type(obs_values_qc_type), allocatable          :: all_values_qc(:)
-    type(obs_values_qc_type), allocatable          :: values_qc(:)
+    type(obs_values_qc_type), allocatable          :: values_qc(:), new_values_qc(:)
     integer                                        :: total_values, all_values, vals_per_proc, total_obs, obs_per_proc, rem, &
         gather_procs, gather_obs_per_proc, gather_vals_per_proc
     integer                                        :: obs_mpi, ierror, i, d, diff, j, l, actual_proc, gather_proc, &
@@ -1616,7 +1660,6 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     rem = modulo(num_obs, gather_procs)
     total_values = num_values * num_obs
     if (gather_proc < rem) gather_obs_per_proc = gather_obs_per_proc + 1
-    allocate(conv_set(gather_obs_per_proc))
     if (my_task_id() == root) then 
         allocate(all_conv_set(num_obs))
         allocate(all_values_qc(total_values))
@@ -1627,8 +1670,8 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     ! allocate(values(total_values * 10))
 
     gather_vals_per_proc = num_values * gather_obs_per_proc
-    ! vals_per_proc = total_values / nprocs
     ! if (gather_proc < rem) gather_vals_per_proc = gather_vals_per_proc + (num_values)
+    allocate(conv_set(gather_obs_per_proc))
     allocate(values_qc(gather_vals_per_proc))
     ! allocate(qc(total_values * 10))
     
@@ -1657,6 +1700,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     ! if (proc == 1) then
     !     print *, 'values(1) (before recv): ', values(1)
     !     print *, 'set(1)%values(1): ', set(1)%values(1)
+    ! deallocate(set)
 
     ! Setup the dedicated data structure
     call setup_obs_mpi(obs_mpi, vals_mpi)
@@ -1726,9 +1770,45 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
         print *, 'after gather'
         call sort_obs_send_by_time(all_conv_set, all_values_qc, num_values, num_obs)
         print *, 'sorted by time (timestamp added)'
+        call sort_roundrobin_inplace(all_conv_set, all_values_qc, num_obs, num_values, nprocs)
+        print *, 'sorted with roundrobin dist'
     endif
 
     call mpi_barrier(MPI_COMM_WORLD, ierror)
+
+    rem = modulo(num_obs, nprocs)
+    if (my_task_id() < rem) obs_per_proc = obs_per_proc + 1
+    vals_per_proc = obs_per_proc * num_values
+    allocate(new_conv_set(obs_per_proc))
+    allocate(new_values_qc(vals_per_proc))
+    call scatter_obs_varied(new_conv_set, all_conv_set, new_values_qc, all_values_qc, obs_mpi, vals_mpi, num_values, num_obs, &
+        nprocs)
+
+    call deallocate_obs_set(new_set, 1, num_values)
+    call allocate_obs_set(new_set, obs_per_proc, num_values)
+
+    call mpi_barrier(MPI_COMM_WORLD, ierror)
+
+    call convert_obs_back(new_set, new_conv_set, obs_per_proc)
+
+    d = 1
+    diff = num_values - 1 
+    do i = 1, obs_per_proc
+        ! values
+        ! values_qc(d:d+diff) = set(i)%values(1:num_values)
+        do j = 1, num_values
+            new_set(i)%values(j) = new_values_qc(j+d-1)%val
+            new_set(i)%qc(j) = new_values_qc(j+d-1)%qc
+        enddo
+        ! values_qc(d:d+diff)%qc = set(i)%qc(1:num_values)
+
+        ! qc
+        ! l = d + num_values
+        ! values_qc(l:l+diff) = set(i)%qc(1:num_values)
+        
+        ! increment our offset
+        d = d + (num_values)
+    enddo 
     ! todo: sort by time, organize roundrobin, and scatter
     ! todo: maybe scatter roundrobin using point to point ops?
     ! todo: figure out how to sort in-place rather than using an additional array
@@ -1789,6 +1869,10 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
 
     deallocate(conv_set)
     deallocate(values_qc)
+    deallocate(disp)
+    deallocate(count)
+    deallocate(disp_vals)
+    deallocate(count_vals)
 
 end subroutine dist_obs_set
 !------------------------------------------------------------------
@@ -2068,8 +2152,8 @@ end subroutine print_obs_send
 
 !------------------------------------------------------------------
 subroutine convert_obs_back(recv, simple_obs, num_obs)
-    type(obs_type),         intent(out)  :: recv(:)
-    type(obs_type_send),    intent(in) :: simple_obs(:)
+    type(obs_type),         intent(inout)  :: recv(:)
+    type(obs_type_send),    intent(inout) :: simple_obs(:)
     ! integer,          intent(in)  :: num_values
     integer(i8),          intent(in)  :: num_obs
 
@@ -2216,35 +2300,77 @@ subroutine sort_roundrobin(buffer, new_buffer, num_obs, num_procs)
 end subroutine sort_roundrobin
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine sort_roundrobin_inplace(buffer, new_buffer, num_obs, num_procs)
-    type(obs_type),             intent(in)       :: buffer(:)
-    integer,                    intent(in)       :: num_procs, num_obs
-    type(obs_type),             intent(out)      :: new_buffer(:)
-    integer                                      :: i, j, obs_per_proc, rem, k
-    
+subroutine sort_roundrobin_inplace(obs_set, values_qc, num_obs, num_values, num_procs)
+    type(obs_type_send), target,             intent(inout)       :: obs_set(:)
+    integer,                    intent(in)       :: num_procs, num_obs, num_values
+    type(obs_values_qc_type), target,            intent(inout)      :: values_qc(:)
+    integer                                      :: i, j, obs_per_proc, rem, k, obs_per_proc_rem, total_values, these_obs, d
+    integer(C_SIZE_T)                            :: num_obs_c, total_vals_c, sizeof_val, sizeof_obs
+    integer, allocatable                                      :: procs(:)
+
+
     obs_per_proc = num_obs / num_procs
     rem = modulo(num_obs, num_procs)
 
-    k = 0
-    print *, 'num_procs: ', num_procs
-    print *, 'obs_per_proc: ', obs_per_proc
+    obs_per_proc_rem = obs_per_proc + 1
+    allocate(procs(num_procs))
     do i = 1, num_procs
-        do j = i, obs_per_proc
-            ! print *, '(', i, ',', j, ')'
-            if (buffer(((i-1)*obs_per_proc) + j)%key == 0 .and. k == 0) then
-                print *, ' 0 key was found at obs ', ((i - 1) * obs_per_proc) + j
-                k = 1
+        procs(i) = obs_per_proc
+        if (i <= rem) procs(i) = procs(i) + 1
+    enddo
+
+    
+    k = 1
+    do i = 1, obs_per_proc
+        do j = 1, num_procs
+            if (j <= rem) then
+                d = obs_per_proc_rem * (j - 1)
+            else 
+                d = (obs_per_proc_rem * rem) + (obs_per_proc * ((j - rem) - 1))
             endif
-            new_buffer(i*j) = buffer(((i-1)*obs_per_proc) + j)
+            obs_set(d + i)%time_order = k
+            values_qc(d + i)%time_order = k
+            k = k + 1
         enddo
-    enddo 
+    enddo
+    
+    do i = 1, rem
+        d = obs_per_proc_rem * i
+        obs_set(d)%time_order = d
+        values_qc(d)%time_order = d 
+    enddo
 
-    if (rem > 0) then
-        do i = 1, rem
-            new_buffer((obs_per_proc * (i + 1)) - 1) = buffer((obs_per_proc * (i + 1)) - 1) 
-        enddo 
-    endif
+    ! k = 1 
+    ! d = 1
+    ! do i = 1, num_procs
+    !     if (i <= rem) then
+    !         d = obs_per_proc_rem * (i - 1)
+    !     else 
+    !         d = (obs_per_proc_rem * rem) + (obs_per_proc * ((i - rem) - 1))
+    !     endif
+    !     do j = 1, procs(i)
+    !         if (j <= obs_per_proc) then
+    !             obs_set(d + j)%time_order = (obs_per_proc * (i - 1)) + j
+    !             values_qc(d + j)%time_order = (obs_per_proc * (i - 1)) + j
+    !         else
+    !             obs_set(d + j)%time_order = d + j
+    !             values_qc(d + j)%time_order = d + j
+    !         endif
+    !     enddo
+    ! enddo
 
+    ! sort both lists
+    total_values = num_obs * num_values
+    total_vals_c = total_values
+    num_obs_c = num_obs
+    sizeof_val = sizeof(values_qc(1))
+    sizeof_obs = sizeof(obs_set(1))
+
+    call qsort(c_loc(obs_set(1)), int(num_obs, c_size_t), sizeof_obs, c_funloc(compare_obs))
+    call qsort(c_loc(values_qc(1)), int(num_obs, c_size_t), sizeof_val, c_funloc(compare_vals))
+    
+
+        
 end subroutine sort_roundrobin_inplace
 !------------------------------------------------------------------
 !------------------------------------------------------------------
