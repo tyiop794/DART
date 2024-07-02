@@ -2602,7 +2602,13 @@ subroutine get_next_time_of_obs(obs_key, file_id, obs_size, num_values, next_tim
     integer(i8),                                        :: new_pos
     integer                                             :: obs_offset, io
 
-    obs_offset = (16 * num_values) + 4
+    ! 2 -- values and qc
+    ! 8 -- byte size of values
+    ! 4 -- size of prev_time
+    obs_offset = (2 * (8 * num_values)) + 4
+
+    ! seek the position of next_time; read into a variable
+    ! curr_obs_next_time = last_obs + offset into following obs
     new_pos = starting_pos + (((obs_key - 1) * obs_size) + obs_offset)
     io = fseek(file_id, new_pos, 0)
     read(file_id, iostat=io) next_time
@@ -2736,6 +2742,7 @@ if (my_task_id() == 0) then
 endif
 
 ! read the next time of every observation using process 0
+! only reading an integer per observation, so hopefully it doesn't take too long
 ! why?: time order should be by process; also don't want to read same observation twice
 k = 1
 if (my_pe == 0) then
@@ -2746,7 +2753,7 @@ if (my_pe == 0) then
     start_times(k) = first_time
     k = k + 1
     if (k - 1 <= rem) our_num_obs = our_num_obs + 1
-    do while (i /= -1)
+    do while (k /= mpi_num + 1)
         call get_next_time_of_obs(i, file_id, obs_size, num_values, next_time, init_pos)
         j = j + 1
         i = next_time
@@ -2761,9 +2768,13 @@ if (my_pe == 0) then
 else
     allocate(start_times(1))
 endif
-call mpi_barrier(MPI_COMM_WORLD, ierror)
+
+
+! scatter the start times
+call mpi_scatter(start_times, 1, MPI_INTEGER, start_times, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierror)
+
 ! Determine num obs per procs and starting obs
-call calc_obs_params(obs_size, my_pe, mpi_num, num_obs, init_pos, obs_pos, lower_bound, split_obs, num_alloc, grem)
+! call calc_obs_params(obs_size, my_pe, mpi_num, num_obs, init_pos, obs_pos, lower_bound, split_obs, num_alloc, grem)
 if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 
 ! Allocate our buffers
@@ -2787,12 +2798,13 @@ call allocate_obs_set(buffer, num_alloc, total_copies)
 ! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
 
 ! Seek the obs position
+obs_pos = init_pos + ((start_times(1) - 1) * obs_size)
 io = fseek(file_id, obs_pos, 0) 
 
 ! todo: need to check for errors after this
 
 ! Read all of the observations using all procs except for those on the first node
-x = lower_bound
+x = start_times(1)
 ! print *, 'hi!'
 ! do j = 1, num_obs
 do j = 1, our_num_obs
