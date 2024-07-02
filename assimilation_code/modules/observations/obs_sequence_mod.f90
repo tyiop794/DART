@@ -1630,6 +1630,55 @@ subroutine scatter_obs_varied(dest, src, dest_val, src_val, obs_mpi, val_mpi, nu
 end subroutine scatter_obs_varied
 !------------------------------------------------------------------
 !------------------------------------------------------------------
+subroutine dist_obs_set_alt(buffer, rem_buf, num_obs, num_values, nprocs, my_pe)
+    type(obs_type), target,             intent(inout)   :: buffer
+    type(obs_type), pointer,            intent(inout)   :: rem_buf(:) => NULL()
+    integer,                            intent(in)      :: num_obs
+    integer,                            intent(in)      :: num_values
+    integer,                            intent(in)      :: nprocs
+    integer,                            intent(in)      :: my_pe
+
+    type(obs_type_send), allocatable, target            :: conv_obs(:)
+    type(obs_values_qc_type), allocatable, target       :: conv_vals(:) 
+    integer                                             :: obs_per_proc, vals_per_proc
+    integer                                             :: obs_mpi, vals_mpi
+    integer                                             :: padded_size
+    integer, allocatable                                :: disp(:), count(:), disp_vals(:), count_vals(:)
+    
+
+
+    obs_per_proc = num_obs / nprocs
+    rem = modulo(num_obs, nprocs)
+    vals_per_proc = obs_per_proc * num_values
+
+    ! allocate buffers for simplified obs 
+    if (my_pe == nprocs - 1) then
+        allocate(conv_obs(obs_per_proc + rem))
+        allocate(conv_vals(vals_per_proc + (rem * num_values)))
+    else
+        ! obs per process + 1 extra
+        allocate(conv_obs(obs_per_proc + 1))
+        allocate(conv_vals(vals_per_proc + num_values))
+    endif
+
+    ! Convert our obs into something which can be sent over MPI
+    call convert_obs_set(buffer, conv_obs, conv_vals, num_values, obs_per_proc)
+
+    ! Setup MPI
+    call setup_obs_mpi(obs_mpi, vals_mpi)
+
+    ! should this be roundrobin? might not make much sense here....
+    ! call mpi_alltoall(buffer, )
+    rem_buf => conv_obs((num_obs - rem + 1):)
+
+    ! scatter the remainder
+    call mpi_scatterv(rem_buf, .., .., obs_mpi, conv_obs, 1, obs_mpi, task_count() - 1, MPI_COMM_WORLD, ierror) 
+    call mpi_scatter
+
+
+end subroutine dist_obs_set_alt
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_proc)
     type(obs_type), allocatable,            intent(inout)      :: set(:)
     type(obs_type), allocatable,           intent(inout)      :: new_set(:)
@@ -2073,11 +2122,12 @@ subroutine recv_obs(obs, proc)
 
 end subroutine recv_obs
 !------------------------------------------------------------------
-subroutine convert_obs_set(orig, out_obs, num_values, num_obs)
-    type(obs_type),         intent(in)  :: orig(:)
-    type(obs_type_send),    intent(out) :: out_obs(:)
-    integer,          intent(in)  :: num_values
-    integer,          intent(in)  :: num_obs
+subroutine convert_obs_set(orig, out_obs, new_vals, num_values, num_obs)
+    type(obs_type),                 intent(inout)   :: orig(:)
+    type(obs_type_send),            intent(inout)   :: out_obs(:)
+    type(obs_values_qc_type),       intent(inout)   :: new_vals(:)
+    integer,                        intent(in)      :: num_values
+    integer,                        intent(in)      :: num_obs
 
     integer :: i, d, j, seconds, days
     real(r8)    :: location(3)
@@ -2116,17 +2166,24 @@ subroutine convert_obs_set(orig, out_obs, num_values, num_obs)
         out_obs(i)%obs_def_key = get_obs_def_key(obs_def)
 
     enddo
-    ! call print_obs_send(out_obs(1))
+    d = 1
+    diff = num_values - 1 
+    do i = 1, num_obs
+        ! values
+        ! values_qc(d:d+diff) = set(i)%values(1:num_values)
+        do j = 1, num_values
+            new_vals(j+d-1)%val = set(i)%values(j)
+            new_vals(j+d-1)%qc = set(i)%qc(j)
+        enddo
+        ! values_qc(d:d+diff)%qc = set(i)%qc(1:num_values)
 
-    ! convert allocatable components to contiguous array
-    ! print *, 'orig(1)%values(1): ', orig(1)%values(1)
-    ! d = 1 ! d for displacement
-    ! do i = 1, num_obs 
-    !     out_values(d:d+num_values) = orig(i)%values(1:num_values)
-    !     out_qc(d:d+num_values) = orig(i)%qc(1:num_values)
-    !     d = d + num_values + 1
-    ! enddo
-    ! call print_obs_send(out_obs(1))
+        ! qc
+        ! l = d + num_values
+        ! values_qc(l:l+diff) = set(i)%qc(1:num_values)
+        
+        ! increment our offset
+        d = d + (num_values)
+    enddo 
 
 end subroutine convert_obs_set
 !------------------------------------------------------------------
@@ -2536,6 +2593,25 @@ subroutine sort_obs_by_time(obs_set, new_obs_set)
 end subroutine sort_obs_by_time
 !------------------------------------------------------------------
 !------------------------------------------------------------------
+subroutine get_next_time_of_obs(obs_key, file_id, obs_size, num_values, next_time, starting_pos)
+    ! todo: make this sort in-place; too much memory used currently
+    ! need to allocate two massive arrays
+    integer,                    intent(in)              :: obs_key, file_id, num_values, obs_size 
+    integer(i8),                intent(in)              :: starting_pos
+    integer,                    intent(out)             :: next_time
+    integer(i8),                                        :: new_pos
+    integer                                             :: obs_offset, io
+
+    obs_offset = (16 * num_values) + 4
+    new_pos = starting_pos + (((obs_key - 1) * obs_size) + obs_offset)
+    io = fseek(file_id, new_pos, 0)
+    read(file_id, iostat=io) next_time
+    
+    ! todo: check these io values; make sure nothing sus happens!
+
+end subroutine get_next_time_of_obs
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine read_obs_seq(file_name, add_copies, add_qc, add_obs, seq)
 
 ! Be able to increase size at read in time for efficiency
@@ -2545,19 +2621,16 @@ integer,                 intent(in)  :: add_copies, add_qc, add_obs
 type(obs_sequence_type), intent(out) :: seq
 
 integer :: i, num_copies, num_qc, num_obs, max_num_obs, file_id, io, num_obs_per_proc, rem, mpi_num, num_alloc, num_to_send, my_pe
-type(obs_type), allocatable :: buffer(:)
-type(obs_type), target, allocatable :: full_buf(:)
-type(obs_type), allocatable :: full_buf_ordered(:)
-type(obs_type), allocatable :: full_buf_rr(:)
-type(obs_type), allocatable :: ordered_buf(:)
-type(obs_type), allocatable :: my_ordered_buf(:)
-type(obs_type), pointer     :: buf_ptr(:)
+type(obs_type), allocatable, target :: buffer(:)
+integer, allocatable                :: start_times(:)
+type(obs_type), pointer :: rem_buf(:) => NULL()
 type(obs_dist_type)         :: dist_md
 !type(obs_type) :: test_obs
 !type(obs_type), allocatable :: ordered(:)
 integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
 integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe
-integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem
+integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem, &
+    our_num_obs, next_time
 integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos 
 character(len=16) :: label(2)
 character(len=32) :: read_format
@@ -2656,35 +2729,60 @@ if (seq%last_time < -1 .or. seq%last_time > max_num_obs) then
 endif
 
 
-! Offset my_pe so that we can conserve space on the first node
-! (currently) assuming that we are using more than a single node
-! my_pe_orig = my_pe
-! mpi_num_orig = mpi_num
-shifted_pe = my_pe - nthreads
-shifted_nprocs = mpi_num - nthreads
-
 ! Get byte size of each obs
 call get_obs_size(file_id, obs_size, total_copies, init_pos)
 if (my_task_id() == 0) then
     print *, 'obs_size: ', obs_size
 endif
 
+! read the next time of every observation using process 0
+! why?: time order should be by process; also don't want to read same observation twice
+k = 1
+if (my_pe == 0) then
+    allocate(start_times(mpi_num))
+    our_num_obs = num_obs_per_proc
+    i = first_time
+    j = 0 ! num of observations we've checked
+    start_times(k) = first_time
+    k = k + 1
+    if (k - 1 <= rem) our_num_obs = our_num_obs + 1
+    do while (i /= -1)
+        call get_next_time_of_obs(i, file_id, obs_size, num_values, next_time, init_pos)
+        j = j + 1
+        i = next_time
+        if (j == our_num_obs) then
+            start_times(k) = i
+            k = k + 1
+            our_num_obs = num_obs_per_proc
+            if (k - 1 <= rem) our_num_obs = our_num_obs + 1
+            j = 0
+        endif
+    enddo
+else
+    allocate(start_times(1))
+endif
+call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! Determine num obs per procs and starting obs
-call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, num_obs, init_pos, obs_pos, lower_bound, split_obs, shifted_alloc, grem)
+call calc_obs_params(obs_size, my_pe, mpi_num, num_obs, init_pos, obs_pos, lower_bound, split_obs, num_alloc, grem)
 if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 
 ! Allocate our buffers
-if (my_task_id() == 0) then
-    ! allocate(full_buf(num_alloc * task_count())
-    ! call allocate_obs_set(full_buf, num_alloc*task_count(), total_copies)
-    call allocate_obs_set(full_buf, shifted_alloc*task_count(), total_copies)
-    ! call allocate_obs_set(full_buf, shifted_alloc*num_obs, total_copies)
-else
-    call allocate_obs_set(full_buf, 1, total_copies)
-endif
+call allocate_obs_set(, 1, total_copies)
 if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
 if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
-call allocate_obs_set(buffer, shifted_alloc, total_copies)
+if (my_pe == task_count() - 1) then 
+    num_alloc = num_alloc + rem
+    num_obs_per_proc = num_obs_per_proc + rem
+endif
+
+our_num_obs = num_obs_per_proc
+if (my_pe < rem) then
+    our_num_obs = our_num_obs + 1
+else
+    our_num_obs = our_num_obs
+endif
+
+call allocate_obs_set(buffer, num_alloc, total_copies)
 ! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
 ! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
 
@@ -2695,38 +2793,49 @@ io = fseek(file_id, obs_pos, 0)
 
 ! Read all of the observations using all procs except for those on the first node
 x = lower_bound
-if (shifted_pe >= 0) then
-    ! print *, 'hi!'
-    ! do j = 1, num_obs
-    do j = 1, split_obs
-       ! if observation is in our set, read
-       ! no need to read if we are past our upper bound
-       ! if (j > upper_bound) exit
-       ! if (j >= lower_bound .and. j <= upper_bound) then
-           ! x = modulo(j, split_obs)
-           if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
-           if (io /= 0) then
-              ! Read error of some type
-              write(string1, *) 'Read error in obs label', i, ' rc= ', io
-              call error_handler(E_ERR, 'read_obs_seq', string1, source)
-           endif
-           call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
-              read_format, total_obs)
-        ! Also set the key in the obs
-        ! Make sure the key is absolute, not relative to the observations being read by this proc
-           buffer(j)%key = x
-           x = x + 1
-           ! create separate arrays so that values and qc can be sent contiguously
-           ! better to calculate this when we've already decided the order in which array will be sent
-           !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
-           !send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
-       ! else
-         ! ...otherwise, skip the observation
-         ! do l = 1, num_lines
-         !     read(file_id, '(A)') test_line_two
-         ! enddo
-       ! endif
-    enddo
+! print *, 'hi!'
+! do j = 1, num_obs
+do j = 1, our_num_obs
+   ! if observation is in our set, read
+   ! no need to read if we are past our upper bound
+   ! if (j > upper_bound) exit
+   ! if (j >= lower_bound .and. j <= upper_bound) then
+       ! x = modulo(j, split_obs)
+       if(.not. read_format == 'unformatted') read(file_id,*, iostat=io) label(1)
+       if (io /= 0) then
+          ! Read error of some type
+          write(string1, *) 'Read error in obs label', i, ' rc= ', io
+          call error_handler(E_ERR, 'read_obs_seq', string1, source)
+       endif
+       call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
+          read_format, total_obs)
+    ! Also set the key in the obs
+    ! Make sure the key is absolute, not relative to the observations being read by this proc
+       buffer(j)%key = x
+       x = x + 1
+       if (buffer(j)%next_time /= buffer(j)%key + 1) then
+           ! Stop right before our next observation
+           ! Move through linked list as we read through obs sequence
+           obs_pos = init_pos + ((buffer(j)%next_time - 1) * obs_size)
+           io = fseek(file_id, obs_pos, 0)
+       endif
+       ! create separate arrays so that values and qc can be sent contiguously
+       ! better to calculate this when we've already decided the order in which array will be sent
+       !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
+       !send_qc(j*num_copies:(j+1)*num_copies) = buffer(j)%qc(1:num_copies)
+   ! else
+     ! ...otherwise, skip the observation
+     ! do l = 1, num_lines
+     !     read(file_id, '(A)') test_line_two
+     ! enddo
+   ! endif
+enddo
+
+! If we're the last process, split the array and point rem to section containing remainder
+if (my_pe == task_count() - 1) then
+    rem => buffer((num_obs - rem + 1):)
+else
+    allocate(rem(1))
 endif
 
 call mpi_barrier(MPI_COMM_WORLD, ierror)
@@ -2734,172 +2843,6 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
 
 if (my_task_id() == 0) print *, 'Made it to gather'
-
-! Should I rewrite this to use point-to-point ops
-! would require less to no padding; easier to send remainder
-! maybe write p2p_gather function?
-! call gather_obs_set(buffer, full_buf, shifted_alloc, num_copies, mpi_num, root)
-! if (my_task_id() == 0) then
-! !     print *, 'hi from proc 0'
-! !     call p2p_gather_obs_set(full_buf, num_obs, num_copies, 0, 0+nthreads, task_count() - 1)
-! ! else
-! !     call p2p_gather_obs_set(buffer, num_obs, num_copies, 0, 0+nthreads, task_count() - 1)
-! ! endif
-!
-! if (my_task_id() == 0) then 
-!     print *, 'Made it past gather'
-!     print *, 'values(1) from 128: ', full_buf(shifted_alloc*128+1)%values(1)
-! endif
-
-! verify that this works before moving further
-! also verify that the values correspond to what is expected
-
-! num_alloc = (num_obs / task_count())
-! rem = modulo(num_obs, task_count())
-! if (rem > 0) num_alloc = num_alloc + 1
-
-! if (my_task_id() == 0) then
-!     buf_ptr => full_buf((nthreads*shifted_alloc)+1:)
-!     call allocate_obs_set(full_buf_ordered, task_count()*num_alloc, num_copies)
-!
-!     x = shifted_alloc
-!     do i = 0, shifted_nprocs - 2
-!         if (i >= grem) then
-!             print *, 'x: ', x, 'key: ', buf_ptr(x)%key
-!             ! buf_ptr(x:x+shifted_alloc-1) = buf_ptr(x+1:x+shifted_alloc)
-!             ! do j = x, x + shifted_alloc - 1
-!             !     buf_ptr(j) = buf_ptr(j+1)
-!             ! enddo
-!             buf_ptr(x:(shifted_alloc*task_count())-(nthreads*shifted_alloc)-1) = buf_ptr(x+1:)
-!             x = x - 1
-!         endif
-!         x = x + shifted_alloc
-!     enddo
-!     buf_ptr(x:)%key = 0
-!     buf_ptr(x:)%next_time = 0
-!     buf_ptr(x:)%prev_time = 0
-!     ! Issue: this is not in-place; may take up too much storage
-!     ! also: a large chunk of the array is completely zeroed out (oops....)
-!     ! (need two arrays of about the same size)
-!     call sort_obs_by_time(buf_ptr, full_buf_ordered)
-!
-!     ! reset the pointer and deallocate the buffer
-!     buf_ptr => NULL()
-!     call deallocate_obs_set(full_buf, num_alloc * task_count(), num_copies)
-!
-!     ! copy 
-!     ! this should be handled by scatter
-!     ! my_ordered_buf(1:num_alloc) = full_buf_ordered(1:num_alloc)
-!
-!     ! num_alloc = num_obs / task_count()
-!     call allocate_obs_set(full_buf_rr, task_count()*num_alloc, num_copies)
-!
-!     print *, 'task_count() * num_alloc: ', task_count()*num_alloc
-!     print *, 'num_obs: ', num_obs
-!     ! todo: round-robin sort these values
-!     ! another todo: try to do this in place as well
-!     call sort_roundrobin(full_buf_ordered, full_buf_rr, num_obs, task_count())
-!
-!     ! do i = 1, num_obs
-!     !     print *, 'full_buf_rr(', i, ')%values(1): ', full_buf_rr(i)%values(1)
-!     ! enddo
-!     
-!     ! end todo
-!
-!     ! my_pe = my_pe_orig
-!     ! mpi_num = mpi_num_orig
-!     ! round-robin distribution of values
-!
-! else
-!     allocate(full_buf_ordered(1))
-! endif
-!
-! if (my_task_id() == 0) print *, 'Attempting to scatter: '
-! call allocate_obs_set(my_ordered_buf, num_alloc, num_copies)
-! if (my_task_id() == 0) print *, 'full_buf_rr(1)%values(1): ', full_buf_rr(1)%values(1)
-! call scatter_obs_set(full_buf_rr, my_ordered_buf, num_alloc, num_copies, task_count(), 0)
-
-
-!
-! ! for testing purposes
-! actual_obs = total_obs - rem
-!
-! ! order our observations by time 
-! if (my_pe == 0) then
-!     l = 1
-!     do i = 1, actual_obs
-!         ordered_buf(i) = buffer(l)
-!         l = buffer(l)%next_time
-!     enddo
-! endif
-!
-! ! called by every process; should split the observations 
-! call scatter_obs_set(ordered_buf, my_ordered_buf, num_obs_per_proc, total_copies, task_count())
-!
-! ! copy retrieved observations to obs_seq
-! seq%obs(1:num_obs_per_proc) = my_ordered_buf(1:num_obs_per_proc)
-
-
-
-! Now read in all the previously defined observations
-! todo: make a function for this; this is kinda gross
-! l = 1
-! do i = 0, mpi_num - 1
-!     ! Check to determine whether the process receives a remainder
-!     if (i < rem) then
-!         num_to_send = num_obs_per_proc + 1
-!     else
-!         num_to_send = num_obs_per_proc
-!     endif
-!     if (i == 1 .and. my_pe == 0) then
-!         print *, 'num_to_send to P1: ', num_to_send
-!     endif
-!     ! Sort the observations up to what the per-proc buffer allows
-!     if (my_pe == 0) then
-!         ! print *, 'hi!'
-!         !l = abs_start
-!         ! order observations based on time taken rather than order read
-!         ! worst case: next time is on opposite end of linked list
-!         seq%first_time = l
-!         do j = 1, num_to_send
-!             ordered_buf(j) = buffer(l)
-!             seq%last_time = l
-!             l = buffer(l)%next_time
-!         enddo
-!         ! send the set of observations and set bounds
-!         ! if the first process is the receiving process, perform a direct copy
-!         if (i == 0) then
-!             !ordered(1:num_to_send) = ordered_buf(1:num_to_send)
-!             seq%num_obs = num_to_send
-!             seq%obs(1:num_to_send) = ordered_buf(1:num_to_send)
-!         else
-!             ! This does not send derived types; need to fix
-!             ! send_obs_set(set, proc, num_obs, num_copies), 
-!             ! print *, 'Attempting to send to process ', i
-!             ! print *, 'num_to_send: ', num_to_send
-!             ! print *, 'total_copies: ', total_copies
-!             call send_obs_set(ordered_buf(1:num_to_send), i, num_to_send, total_copies)
-!         endif
-!     else
-!         ! retrieve the observations using MPI
-!         if (my_pe == i) then
-!             ! print *, 'Process ', i, ' is receiving'
-!             ! print *, 'num_to_send: ', num_to_send
-!             ! jprint *, 'total_copies: ', total_copies
-!             ! print * , 'ordered_buf(1)%values(1): ', ordered_buf(1)%values(1)
-!             ordered_buf(1)%values(1) = 7
-!             call recv_obs_set(ordered_buf(1:num_to_send), 0, num_to_send, total_copies)
-!             ! print * , 'ordered_buf(1)%values(1) (after recv): ', ordered_buf(1)%values(1)
-!             ! print * , 'ordered_buf(1)%key(1) (after recv): ', ordered_buf(1)%key
-!             seq%num_obs = num_to_send
-!             seq%obs(1:num_to_send) = ordered_buf(1:num_to_send)
-!             ! print * , 'ordered_buf(1)%values(1) (after copy to obs): ', ordered_buf(1)%values(1)
-!             ! print * , 'ordered_buf(1)%key(1) (after copy to obs): ', ordered_buf(1)%key
-!             ! print *, 'seq%obs(1)%key: ', seq%obs(1)%key
-!         endif
-!     endif
-! end do
-
 
 
 ! No process should pass until all processes have received their obs
