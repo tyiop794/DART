@@ -1323,42 +1323,40 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     integer,                    intent(inout)      :: num_values
 
     type(obs_type_send), allocatable               :: conv_set(:)
-    real(r8), allocatable                          :: values(:)
-    real(r8), allocatable                          :: qc(:)
+    type(obs_values_qc_type), allocatable          :: values_qc(:)
     integer                                        :: total_values
-    integer                                        :: obs_mpi, ierror, i, d, diff
+    integer                                        :: obs_mpi, ierror, i, d, diff, val_mpi
 
     total_values = num_values * num_obs
     allocate(conv_set(num_obs))
     print *, 'num_obs: ', num_obs
-    allocate(values(total_values * 10))
-    allocate(qc(total_values * 10))
+    allocate(values_qc(total_values * 10))
     
     ! Convert to a struct with fully contiguous memory 
-    call convert_obs_set(set, conv_set, num_values, num_obs)
+    call convert_obs_set(set, conv_set, values_qc, num_values, num_obs)
 
     ! copy values from allocatable arrays
-    d = 1
-    diff = num_values - 1 
-    do i = 1, num_obs
-        values(d:d+diff) = set(i)%values(1:num_values)
-        qc(d:d+diff) = set(i)%qc(1:num_values)
-        d = d + diff + 1
-    enddo 
+    ! d = 1
+    ! diff = num_values - 1 
+    ! do i = 1, num_obs
+    !     values(d:d+diff) = set(i)%values(1:num_values)
+    !     qc(d:d+diff) = set(i)%qc(1:num_values)
+    !     d = d + diff + 1
+    ! enddo 
     ! if (proc == 1) then
     !     print *, 'values(1) (before recv): ', values(1)
     !     print *, 'set(1)%values(1): ', set(1)%values(1)
     ! endif 
 
     ! Setup the dedicated data structure
-    ! call setup_obs_mpi(obs_mpi)
+    call setup_obs_mpi(obs_mpi, val_mpi)
 
     ! Send the full set to processor specified
     ! also send values and qc
     ! KY this isn't ideal; takes way too long to communicate
     ! print *, 'total_values: ', total_values
-    call mpi_ssend(values, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
-    call mpi_ssend(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    ! call mpi_ssend(values, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
+    ! call mpi_ssend(qc, total_values, MPI_REAL8, proc, 0, MPI_COMM_WORLD, ierror)
     call mpi_ssend(conv_set, num_obs, obs_mpi, proc, 0, MPI_COMM_WORLD, ierror)
     
     ! Let's try using MPI_Scatter instead! 
@@ -1372,8 +1370,8 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     ! After send has completed, destroy the mpi struct and deallocate memory
     call destroy_obs_mpi(obs_mpi)
     deallocate(conv_set)
-    deallocate(values)
-    deallocate(qc)
+    deallocate(values_qc)
+    ! deallocate(qc)
 
 
 end subroutine send_obs_set
@@ -1478,8 +1476,8 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     type(obs_type_send), allocatable               :: all_conv_set(:)
     ! real(r8), allocatable                          :: values(:)
     ! real(r8), allocatable                          :: qc(:)
-    real(r8), allocatable                          :: all_values_qc(:)
-    real(r8), allocatable                          :: values_qc(:)
+    type(obs_values_qc_type), allocatable          :: all_values_qc(:)
+    type(obs_values_qc_type), allocatable          :: values_qc(:)
     integer                                        :: total_values, all_values, vals_per_proc, total_obs
     integer                                        :: obs_mpi, ierror, i, d, diff, j, l
 
@@ -1493,7 +1491,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     allocate(conv_set(num_obs_per_proc))
     ! allocate(values(total_values * 10))
 
-    all_values = total_values * 2 ! values + qc = 2
+    all_values = total_values ! values + qc = 2
     vals_per_proc = all_values / nprocs
     if (my_task_id() == root) then
         allocate(all_values_qc(all_values))
@@ -1505,23 +1503,23 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     
     ! Convert to a struct with fully contiguous memory 
     if (my_task_id() == root) then
-        call convert_obs_set(set, all_conv_set, num_values, total_obs)
+        call convert_obs_set(set, all_conv_set, values_qc, num_values, total_obs)
 
         ! copy values from allocatable arrays
-        d = 1
-        diff = num_values - 1 
-        do i = 1, total_obs
-            ! values
-            ! print *, i
-            all_values_qc(d:d+diff) = set(i)%values(1:num_values)
-
-            ! qc
-            l = d + num_values
-            all_values_qc(l:l+diff) = set(i)%qc(1:num_values)
-            
-            ! increment our offset
-            d = d + (num_values * 2)
-        enddo 
+        ! d = 1
+        ! diff = num_values - 1 
+        ! do i = 1, total_obs
+        !     ! values
+        !     ! print *, i
+        !     all_values_qc(d:d+diff) = set(i)%values(1:num_values)
+        !
+        !     ! qc
+        !     l = d + num_values
+        !     all_values_qc(l:l+diff) = set(i)%qc(1:num_values)
+        !     
+        !     ! increment our offset
+        !     d = d + (num_values * 2)
+        ! enddo 
         ! if (proc == 1) then
         !     print *, 'values(1) (before recv): ', values(1)
         !     print *, 'set(1)%values(1): ', set(1)%values(1)
@@ -1550,27 +1548,27 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     ! print *, 'set(1)%key (before setting values): ', set(1)%key
     ! do values_qc conversion, but in reverse
     
-    d = 1
-    diff = num_values - 1 
-    do i = 1, num_obs_per_proc
-        ! make sure arrays are allocated
-        if (.not. allocated(new_set(i)%values)) then
-            allocate(new_set(i)%values(num_values))
-        endif
-        if (.not. allocated(new_set(i)%qc)) then
-            allocate(new_set(i)%qc(num_values))
-        endif
-
-        ! values
-        new_set(i)%values(1:num_values) = values_qc(d:d+diff)
-
-        ! qc
-        l = d + num_values
-        new_set(i)%qc(1:num_values) = values_qc(l:l+diff)
-        
-        ! increment our offset
-        d = d + (num_values * 2)
-    enddo 
+    ! d = 1
+    ! diff = num_values - 1 
+    ! do i = 1, num_obs_per_proc
+    !     ! make sure arrays are allocated
+    !     if (.not. allocated(new_set(i)%values)) then
+    !         allocate(new_set(i)%values(num_values))
+    !     endif
+    !     if (.not. allocated(new_set(i)%qc)) then
+    !         allocate(new_set(i)%qc(num_values))
+    !     endif
+    !
+    !     ! values
+    !     new_set(i)%values(1:num_values) = values_qc(d:d+diff)
+    !
+    !     ! qc
+    !     l = d + num_values
+    !     new_set(i)%qc(1:num_values) = values_qc(l:l+diff)
+    !     
+    !     ! increment our offset
+    !     d = d + (num_values * 2)
+    ! enddo 
     
     ! After send has completed, destroy the mpi struct datatype and deallocate memory
     call destroy_obs_mpi(obs_mpi)
@@ -1631,8 +1629,8 @@ end subroutine scatter_obs_varied
 !------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine dist_obs_set_alt(buffer, rem_buf, num_obs, num_values, nprocs, my_pe)
-    type(obs_type), target,             intent(inout)   :: buffer
-    type(obs_type), pointer,            intent(inout)   :: rem_buf(:) => NULL()
+    type(obs_type), target,             intent(inout)   :: buffer(:)
+    type(obs_type_send), pointer,            intent(inout)   :: rem_buf(:)
     integer,                            intent(in)      :: num_obs
     integer,                            intent(in)      :: num_values
     integer,                            intent(in)      :: nprocs
@@ -1642,7 +1640,7 @@ subroutine dist_obs_set_alt(buffer, rem_buf, num_obs, num_values, nprocs, my_pe)
     type(obs_values_qc_type), allocatable, target       :: conv_vals(:) 
     integer                                             :: obs_per_proc, vals_per_proc
     integer                                             :: obs_mpi, vals_mpi
-    integer                                             :: padded_size
+    integer                                             :: padded_size, rem
     integer, allocatable                                :: disp(:), count(:), disp_vals(:), count_vals(:)
     
 
@@ -1672,8 +1670,8 @@ subroutine dist_obs_set_alt(buffer, rem_buf, num_obs, num_values, nprocs, my_pe)
     rem_buf => conv_obs((num_obs - rem + 1):)
 
     ! scatter the remainder
-    call mpi_scatterv(rem_buf, .., .., obs_mpi, conv_obs, 1, obs_mpi, task_count() - 1, MPI_COMM_WORLD, ierror) 
-    call mpi_scatter
+    ! call mpi_scatterv(rem_buf, .., .., obs_mpi, conv_obs, 1, obs_mpi, task_count() - 1, MPI_COMM_WORLD, ierror) 
+    ! call mpi_scatter
 
 
 end subroutine dist_obs_set_alt
@@ -1725,7 +1723,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     ! allocate(qc(total_values * 10))
     
     ! Convert to a struct with fully contiguous memory 
-    call convert_obs_set(set, conv_set, num_values, gather_obs_per_proc)
+    call convert_obs_set(set, conv_set, values_qc, num_values, gather_obs_per_proc)
 
     ! copy values from allocatable arrays
     d = 1
@@ -1938,8 +1936,8 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
     type(obs_type_send), allocatable               :: all_conv_set(:)
     ! real(r8), allocatable                          :: values(:)
     ! real(r8), allocatable                          :: qc(:)
-    real(r8), allocatable                          :: all_values_qc(:)
-    real(r8), allocatable                          :: values_qc(:)
+    type(obs_values_qc_type), allocatable                          :: all_values_qc(:)
+    type(obs_values_qc_type), allocatable                          :: values_qc(:)
     integer(i8)                                    :: total_values, all_values, vals_per_proc, total_obs
     integer                                        :: obs_mpi, ierror, i, d, diff, j, l, first
 
@@ -1960,22 +1958,22 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
     ! allocate(qc(total_values * 10))
     
     ! Convert to a struct with fully contiguous memory 
-    call convert_obs_set(set, conv_set, num_values, num_obs_per_proc)
+    call convert_obs_set(set, conv_set, values_qc, num_values, num_obs_per_proc)
 
     ! copy values from allocatable arrays
-    d = 1
-    diff = num_values - 1 
-    do i = 1, num_obs_per_proc
-        ! values
-        values_qc(d:d+diff) = set(i)%values(1:num_values)
-
-        ! qc
-        l = d + num_values
-        values_qc(l:l+diff) = set(i)%qc(1:num_values)
-        
-        ! increment our offset
-        d = d + (num_values * 2)
-    enddo 
+    ! d = 1
+    ! diff = num_values - 1 
+    ! do i = 1, num_obs_per_proc
+    !     ! values
+    !     values_qc(d:d+diff) = set(i)%values(1:num_values)
+    !
+    !     ! qc
+    !     l = d + num_values
+    !     values_qc(l:l+diff) = set(i)%qc(1:num_values)
+    !     
+    !     ! increment our offset
+    !     d = d + (num_values * 2)
+    ! enddo 
     ! if (proc == 1) then
     !     print *, 'values(1) (before recv): ', values(1)
     !     print *, 'set(1)%values(1): ', set(1)%values(1)
@@ -2019,28 +2017,28 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
         ! print *, 'set(1)%key (before setting values): ', set(1)%key
         ! do values_qc conversion, but in reverse
         
-        d = 1
-        diff = num_values - 1 
-        do i = 1, total_obs
-            ! make sure arrays are allocated
-            if (.not. allocated(new_set(i)%values)) then
-                allocate(new_set(i)%values(num_values))
-            endif
-            if (.not. allocated(new_set(i)%qc)) then
-                allocate(new_set(i)%qc(num_values))
-            endif
-
-            ! values
-            new_set(i)%values(1:num_values) = all_values_qc(d:d+diff)
-
-            ! qc
-            l = d + num_values
-            new_set(i)%qc(1:num_values) = all_values_qc(l:l+diff)
-            
-            ! increment our offset
-            d = d + (num_values * 2)
-        enddo 
-
+        ! d = 1
+        ! diff = num_values - 1 
+        ! do i = 1, total_obs
+        !     ! make sure arrays are allocated
+        !     if (.not. allocated(new_set(i)%values)) then
+        !         allocate(new_set(i)%values(num_values))
+        !     endif
+        !     if (.not. allocated(new_set(i)%qc)) then
+        !         allocate(new_set(i)%qc(num_values))
+        !     endif
+        !
+        !     ! values
+        !     new_set(i)%values(1:num_values) = all_values_qc(d:d+diff)
+        !
+        !     ! qc
+        !     l = d + num_values
+        !     new_set(i)%qc(1:num_values) = all_values_qc(l:l+diff)
+        !     
+        !     ! increment our offset
+        !     d = d + (num_values * 2)
+        ! enddo 
+        !
 
     endif
 
@@ -2129,7 +2127,7 @@ subroutine convert_obs_set(orig, out_obs, new_vals, num_values, num_obs)
     integer,                        intent(in)      :: num_values
     integer,                        intent(in)      :: num_obs
 
-    integer :: i, d, j, seconds, days
+    integer :: i, d, j, seconds, days, diff
     real(r8)    :: location(3)
     integer     :: which_vert
     type(location_type)  :: orig_location
@@ -2172,8 +2170,8 @@ subroutine convert_obs_set(orig, out_obs, new_vals, num_values, num_obs)
         ! values
         ! values_qc(d:d+diff) = set(i)%values(1:num_values)
         do j = 1, num_values
-            new_vals(j+d-1)%val = set(i)%values(j)
-            new_vals(j+d-1)%qc = set(i)%qc(j)
+            new_vals(j+d-1)%val = orig(i)%values(j)
+            new_vals(j+d-1)%qc = orig(i)%qc(j)
         enddo
         ! values_qc(d:d+diff)%qc = set(i)%qc(1:num_values)
 
@@ -2484,6 +2482,8 @@ subroutine get_obs_size(file_id, obs_size, num_values, init_pos)
 
     ! Determine our initial position
     init_pos = ftell(file_id)
+    ! print *, 'init_pos: ', init_pos
+    ! print *, 'num_values: ', num_values
 
     ! Read observation
     ! some of these values are false but it shouldn't matter here
@@ -2599,19 +2599,25 @@ subroutine get_next_time_of_obs(obs_key, file_id, obs_size, num_values, next_tim
     integer,                    intent(in)              :: obs_key, file_id, num_values, obs_size 
     integer(i8),                intent(in)              :: starting_pos
     integer,                    intent(out)             :: next_time
-    integer(i8),                                        :: new_pos
-    integer                                             :: obs_offset, io
+    integer(i8)                                         :: new_pos, obs_offset, obs_offset_two, curr_offset
+    integer                                             :: io, prev_time, conv_set
 
     ! 2 -- values and qc
     ! 8 -- byte size of values
     ! 4 -- size of prev_time
-    obs_offset = (2 * (8 * num_values)) + 4
+    obs_offset = (2 * (16 * num_values))
+    obs_offset_two = (obs_key - 1) * obs_size
+    ! curr_offset = ftell(file_id)
 
     ! seek the position of next_time; read into a variable
     ! curr_obs_next_time = last_obs + offset into following obs
-    new_pos = starting_pos + (((obs_key - 1) * obs_size) + obs_offset)
+    new_pos = starting_pos + obs_offset + obs_offset_two
+    ! new_pos = (obs_offset + obs_offset_two + starting_pos) - curr_offset
     io = fseek(file_id, new_pos, 0)
-    read(file_id, iostat=io) next_time
+    read(file_id, iostat=io) prev_time, next_time, conv_set
+    ! if (next_time > 16268800) then
+    !     print *, next_time
+    ! endif
     
     ! todo: check these io values; make sure nothing sus happens!
 
@@ -2634,7 +2640,7 @@ type(obs_dist_type)         :: dist_md
 !type(obs_type) :: test_obs
 !type(obs_type), allocatable :: ordered(:)
 integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
-integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe
+integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe, our_start_time
 integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem, &
     our_num_obs, next_time
 integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos 
@@ -2741,6 +2747,8 @@ if (my_task_id() == 0) then
     print *, 'obs_size: ', obs_size
 endif
 
+call mpi_barrier(MPI_COMM_WORLD, ierror)
+
 ! read the next time of every observation using process 0
 ! only reading an integer per observation, so hopefully it doesn't take too long
 ! why?: time order should be by process; also don't want to read same observation twice
@@ -2748,16 +2756,27 @@ k = 1
 if (my_pe == 0) then
     allocate(start_times(mpi_num))
     our_num_obs = num_obs_per_proc
-    i = first_time
+    i = seq%first_time
     j = 0 ! num of observations we've checked
-    start_times(k) = first_time
+    start_times(k) = seq%first_time
     k = k + 1
     if (k - 1 <= rem) our_num_obs = our_num_obs + 1
-    do while (k /= mpi_num + 1)
-        call get_next_time_of_obs(i, file_id, obs_size, num_values, next_time, init_pos)
+    do while (k /=  mpi_num + 1)
+        call get_next_time_of_obs(i, file_id, obs_size, num_copies, next_time, init_pos)
         j = j + 1
+        ! if (i > next_time) then
+        !     print *, 'uh oh!'
+        !     return
+        ! endif
         i = next_time
+        ! if (modulo(i, 1000000) == 0) then
+        !     print *, 'i = ', i
+        ! endif
+        ! if (i == 64000000) then
+        !     exit
+        ! endif
         if (j == our_num_obs) then
+            ! print *, 'start_times(', k, ') = ', i 
             start_times(k) = i
             k = k + 1
             our_num_obs = num_obs_per_proc
@@ -2769,22 +2788,31 @@ else
     allocate(start_times(1))
 endif
 
-
+! call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! scatter the start times
-call mpi_scatter(start_times, 1, MPI_INTEGER, start_times, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierror)
+call mpi_scatter(start_times, 1, MPI_INTEGER, our_start_time, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierror)
+
+! if (my_pe == 0) then
+!     do i = 1, mpi_num
+!         print *, 'start_times(', i, ') = ', start_times(i)
+!     enddo
+! endif
+! call mpi_barrier(MPI_COMM_WORLD, ierror)
+! return
+! return ! need to test before we move further
 
 ! Determine num obs per procs and starting obs
 ! call calc_obs_params(obs_size, my_pe, mpi_num, num_obs, init_pos, obs_pos, lower_bound, split_obs, num_alloc, grem)
-if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
+! if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 
 ! Allocate our buffers
-call allocate_obs_set(, 1, total_copies)
-if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
-if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
-if (my_pe == task_count() - 1) then 
-    num_alloc = num_alloc + rem
-    num_obs_per_proc = num_obs_per_proc + rem
-endif
+! call allocate_obs_set(, 1, total_copies)
+! if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
+! if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
+! if (my_pe == task_count() - 1) then 
+!     num_alloc = num_alloc + rem
+!     num_obs_per_proc = num_obs_per_proc + rem
+! endif
 
 our_num_obs = num_obs_per_proc
 if (my_pe < rem) then
@@ -2793,18 +2821,18 @@ else
     our_num_obs = our_num_obs
 endif
 
-call allocate_obs_set(buffer, num_alloc, total_copies)
+call allocate_obs_set(buffer, our_num_obs, total_copies)
 ! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
 ! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
 
 ! Seek the obs position
-obs_pos = init_pos + ((start_times(1) - 1) * obs_size)
+obs_pos = init_pos + ((our_start_time - 1) * obs_size)
 io = fseek(file_id, obs_pos, 0) 
 
 ! todo: need to check for errors after this
 
 ! Read all of the observations using all procs except for those on the first node
-x = start_times(1)
+x = our_start_time
 ! print *, 'hi!'
 ! do j = 1, num_obs
 do j = 1, our_num_obs
@@ -2825,7 +2853,7 @@ do j = 1, our_num_obs
     ! Make sure the key is absolute, not relative to the observations being read by this proc
        buffer(j)%key = x
        x = x + 1
-       if (buffer(j)%next_time /= buffer(j)%key + 1) then
+       if (buffer(j)%next_time /= buffer(j)%key + 1 .and. buffer(j)%next_time /= -1) then
            ! Stop right before our next observation
            ! Move through linked list as we read through obs sequence
            obs_pos = init_pos + ((buffer(j)%next_time - 1) * obs_size)
@@ -2844,22 +2872,22 @@ do j = 1, our_num_obs
 enddo
 
 ! If we're the last process, split the array and point rem to section containing remainder
-if (my_pe == task_count() - 1) then
-    rem => buffer((num_obs - rem + 1):)
-else
-    allocate(rem(1))
-endif
+! if (my_pe == task_count() - 1) then
+!     rem => buffer((num_obs - rem + 1):)
+! else
+!     allocate(rem(1))
+! endif
 
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
+! call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
 
 if (my_task_id() == 0) print *, 'Made it to gather'
 
 
 ! No process should pass until all processes have received their obs
 ! Don't deallocate memory before all obs have been passed around successfully!
-call mpi_barrier(MPI_COMM_WORLD, ierror)
+! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! if (my_pe == 0) then
 !     do i = 1, obs_per_proc
@@ -4198,6 +4226,7 @@ integer  :: i, io
 real(r8) :: temp_val
 
 ! Read in values and qc
+! print *, 'Position before values are read: ', ftell(file_id)
 if(num_copies > 0) then
    if(read_format == 'unformatted') then
       do i = 1, num_copies
@@ -4218,6 +4247,7 @@ if(num_copies > 0) then
    endif
 endif
 
+! print *, 'Position before qc is read: ', ftell(file_id)
 if(num_qc > 0) then
    if(read_format == 'unformatted') then
       do i = 1, num_qc
@@ -4246,8 +4276,10 @@ else
 endif 
 
 ! Read in linked list pointers and error check
+! print *, 'Position before prev_time: ', ftell(file_id)
 if(read_format == 'unformatted') then
    read(file_id, iostat=io) obs%prev_time, obs%next_time, obs%cov_group
+   ! print *, 'Position after reading all times: ', ftell(file_id)
 else
    read(file_id, *, iostat=io) obs%prev_time, obs%next_time, obs%cov_group
 endif
