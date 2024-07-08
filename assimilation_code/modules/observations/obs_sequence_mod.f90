@@ -1182,21 +1182,23 @@ subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos
 
     obs_pos = start_pos
     starting_obs = 1
-    do i = 0, my_pe - 1
-        if (i < rem) then
-            obs_pos = obs_pos + (obs_with_rem * obs_size)
-            starting_obs = starting_obs + obs_with_rem
-        else
-            obs_pos = obs_pos + (obs_per_proc * obs_size)
-            starting_obs = starting_obs + obs_per_proc
-        endif
-    enddo
+    obs_pos = obs_pos + (obs_per_proc * obs_size * (my_pe))
+    starting_obs = starting_obs + (obs_per_proc * (my_pe))
+    ! do i = 0, my_pe - 1
+    !     if (i < rem) then
+    !         obs_pos = obs_pos + (obs_with_rem * obs_size)
+    !         starting_obs = starting_obs + obs_with_rem
+    !     else
+    !         obs_pos = obs_pos + (obs_per_proc * obs_size)
+    !         starting_obs = starting_obs + obs_per_proc
+    !     endif
+    ! enddo
 
-    if (my_pe < rem) then
-        obs_per_this_proc = obs_with_rem
-    else
-        obs_per_this_proc = obs_per_proc
-    endif
+    ! if (my_pe < rem) then
+    !     obs_per_this_proc = obs_with_rem
+    ! else
+    !     obs_per_this_proc = obs_per_proc
+    ! endif
     
     num_alloc = obs_with_rem
 
@@ -1255,7 +1257,7 @@ type(obs_type), pointer     :: buf_ptr(:)
 !type(obs_type), allocatable :: ordered(:)
 integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
 integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe
-integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem
+integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem, my_obs
 integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos 
 character(len=16) :: label(2)
 character(len=32) :: read_format
@@ -1287,7 +1289,9 @@ rem = modulo(total_obs, mpi_num)
 num_alloc = num_obs_per_proc + 1
 my_pe = my_task_id()
 
-if (my_pe < rem) num_obs_per_proc = num_obs_per_proc + 1
+my_obs = num_obs_per_proc
+if (my_pe < rem) my_obs = my_obs + 1 
+
 ! Get number of threads and nodes
 call get_job_info(nthreads, nnodes)
 
@@ -1371,7 +1375,7 @@ if (my_task_id() == 0) then
 endif
 
 ! Determine num obs per procs and starting obs
-total_obs = num_obs_per_proc * mpi_num
+! total_obs = num_obs_per_proc * mpi_num
 ! call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, num_obs, init_pos, obs_pos, lower_bound, split_obs, shifted_alloc, grem)
 call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, total_obs, init_pos, obs_pos, lower_bound, split_obs, shifted_alloc, grem)
 if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
@@ -1389,8 +1393,8 @@ if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
 if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
 ! call allocate_obs_set(buffer, shifted_alloc, total_copies)
 ! call allocate_obs_set(buffer, num_alloc, total_copies)
-call allocate_obs_set(buffer, num_obs_per_proc, total_copies)
-print *, num_obs_per_proc
+call allocate_obs_set(buffer, num_alloc, total_copies)
+! print *, num_obs_per_proc
 ! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
 ! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
 
@@ -1406,7 +1410,7 @@ x = lower_bound
 if (my_pe >= 0) then
     ! print *, 'hi!'
     ! do j = 1, num_obs
-    do j = 1, num_obs_per_proc
+    do j = 1, my_obs
        ! if observation is in our set, read
        ! no need to read if we are past our upper bound
        ! if (j > upper_bound) exit
@@ -1419,11 +1423,17 @@ if (my_pe >= 0) then
               call error_handler(E_ERR, 'read_obs_seq', string1, source)
            endif
            call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
-              read_format, total_obs + 1)
+              read_format, total_obs)
         ! Also set the key in the obs
         ! Make sure the key is absolute, not relative to the observations being read by this proc
            buffer(j)%key = x
            x = x + 1
+           if (j >= num_obs_per_proc) then
+               obs_pos = init_pos + (((total_obs - rem) + my_pe) * obs_size)
+               io = fseek(file_id, obs_pos, 0)
+               x = (total_obs - rem) + my_pe + 1
+               ! print *, x
+           endif
            ! create separate arrays so that values and qc can be sent contiguously
            ! better to calculate this when we've already decided the order in which array will be sent
            !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
@@ -1437,22 +1447,27 @@ if (my_pe >= 0) then
     enddo
 endif
 
+print *, 'Process ', my_pe, ' reached barrier'
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
 ! total_obs = num_obs_per_proc * mpi_num
 if (my_task_id() == 0) print *, 'Initializing obs window'
-call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, 0) 
-if (my_task_id() == 0) print *, odt%obs_win
+call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc) 
 
+if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 if (my_task_id() == 0) then
-    do i = 1, total_obs
+    i = 1
+    do while (i /= -1)
         call get_obs_dist(i, test_obs)
+        ! call print_obs(test_obs)
+        ! print *, 'i = ', i 
         if (modulo(test_obs%key, 1000000) == 0) then
             print *, 'i = ', i
         endif
+        i = test_obs%next_time
     enddo
 endif
 

@@ -288,19 +288,20 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
 end subroutine dist_obs_set
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem)
+subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc)
     ! this will initialize the obs window for one-sided communication
     type(obs_type),          intent(inout)      :: buffer(:)
     integer,                 intent(in)         :: num_obs_per_proc
     integer,                 intent(in)         :: total_obs
     integer,                 intent(in)         :: rem
+    integer,                 intent(in)         :: num_alloc
     integer                                     :: ierror
     integer                                     :: num_vals
 
     ! allocate our buffers to be number of obs on this process
-    allocate(odt%obs_buf(num_obs_per_proc))
-    allocate(odt%val_buf(num_obs_per_proc*num_vals_per_obs))
+    allocate(odt%obs_buf(num_alloc))
     num_vals = num_obs_per_proc * num_vals_per_obs
+    allocate(odt%val_buf(num_alloc*num_vals_per_obs))
     odt%num_obs_per_proc = num_obs_per_proc
     odt%num_vals_per_proc = num_vals
     odt%total_obs = total_obs
@@ -311,14 +312,14 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
 
     ! convert to sendable datatype
-    call convert_obs_set(buffer, odt%obs_buf, odt%val_buf, num_vals_per_obs, odt%num_obs_per_proc)
+    call convert_obs_set(buffer, odt%obs_buf, odt%val_buf, num_vals_per_obs, num_alloc)
 
     ! create windows
-    call mpi_win_create(odt%obs_buf, odt%num_obs_per_proc * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+    call mpi_win_create(odt%obs_buf, num_alloc * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
     odt%obs_win, &
     ierror)
 
-    call mpi_win_create(odt%val_buf, odt%num_vals_per_proc * sizeof(odt%val_buf(1)), sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+    call mpi_win_create(odt%val_buf, num_alloc * num_vals_per_obs * sizeof(odt%val_buf(1)), sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
     odt%val_win, &
     ierror)
     ! if (odt%my_pe == 0) print *, ierror
@@ -347,7 +348,7 @@ subroutine get_obs_dist(key, obs)
     if (key > odt%total_obs - odt%rem) then
         print *, 'different calculations here'
         obs_pe = modulo(key, odt%num_obs_per_proc) - 1
-        obs_offset = odt%num_obs_per_proc + 1
+        obs_offset = odt%num_obs_per_proc
         val_offset = obs_offset * odt%num_vals_per_obs
     else
         obs_pe = (key - 1) / odt%num_obs_per_proc
