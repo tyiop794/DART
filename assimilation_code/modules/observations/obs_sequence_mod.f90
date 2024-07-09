@@ -1472,20 +1472,20 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
 
-! if (my_task_id() < 8) then
-!     dunkus = (64000000 / 8)
-!     i = (dunkus * my_task_id()) + 1
-!     j = i + dunkus - 1
-!     do while (i /= j)
-!         call get_obs_dist(i, test_obs)
-!         ! call print_obs(test_obs)
-!         ! print *, 'i = ', i 
-!         ! if (modulo(test_obs%key, 1000000) == 0) then
-!         !     print *, 'i = ', i
-!         ! endif
-!         i = test_obs%next_time
-!     enddo
-! endif
+if (my_task_id() < 8) then
+    dunkus = (64000000 / 8)
+    i = (dunkus * my_task_id()) + 1
+    j = i + dunkus - 1
+    do while (i /= j)
+        call get_obs_dist(i, test_obs)
+        ! call print_obs(test_obs)
+        ! print *, 'i = ', i 
+        ! if (modulo(test_obs%key, 1000000) == 0) then
+        !     print *, 'i = ', i
+        ! endif
+        i = test_obs%next_time
+    enddo
+endif
 
 
 call mpi_barrier(MPI_COMM_WORLD, ierror)

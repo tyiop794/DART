@@ -390,7 +390,7 @@ end subroutine destroy_obs_window
 !------------------------------------------------------------------
 
 subroutine destroy_obs_mpi(mpi_obstype, mpi_valstype)
-    integer,                    intent(in)       :: mpi_obstype, mpi_valstype
+    integer,                    intent(inout)       :: mpi_obstype, mpi_valstype
     integer                                      :: ierror
 
     call mpi_type_free(mpi_obstype, ierror)
