@@ -1166,15 +1166,15 @@ end subroutine write_obs_seq
 
 !------------------------------------------------------------------
 subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, obs_per_this_proc, num_alloc, rem)
-    integer,            intent(in)          :: obs_size
-    integer,            intent(in)          :: my_pe
+    integer(i8),        intent(in)          :: obs_size
+    integer(i8),        intent(in)          :: my_pe
     integer,            intent(in)          :: num_obs 
     integer,            intent(in)          :: num_pes
     integer(i8),        intent(in)          :: start_pos
     integer(i8),        intent(out)         :: obs_pos
     integer,            intent(out)         :: starting_obs, obs_per_this_proc, num_alloc
     integer,            intent(inout)       :: rem
-    integer                                 :: i, obs_with_rem, obs_per_proc
+    integer(i8)                             :: i, obs_with_rem, obs_per_proc
 
     obs_per_proc = num_obs / num_pes
     rem = modulo(num_obs, num_pes)
@@ -1258,12 +1258,13 @@ type(obs_type), pointer     :: buf_ptr(:)
 integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
 integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe
 integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem, my_obs
-integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos 
+integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos, new_offset
 character(len=16) :: label(2)
 character(len=32) :: read_format
 character(len=4) :: test_line
 character(len=128) :: test_line_two
 logical :: dummy
+integer :: dunkus
 
 ! Use read_obs_seq_header to get file format and header info
 ! KY Header can be read by all processes
@@ -1401,6 +1402,8 @@ call allocate_obs_set(buffer, num_alloc, total_copies)
 ! Seek the obs position
 ! obs_pos = init_pos + ((num_obs_per_proc * obs_size) * my_pe)
 io = fseek(file_id, obs_pos, 0) 
+! print *, 'PE: ', my_task_id(), 'obs_pos :', obs_pos
+! return
 
 ! todo: need to check for errors after this
 
@@ -1429,7 +1432,10 @@ if (my_pe >= 0) then
            buffer(j)%key = x
            x = x + 1
            if (j >= num_obs_per_proc) then
-               obs_pos = init_pos + (((total_obs - rem) + my_pe) * obs_size)
+               new_offset = ((total_obs - rem) + my_pe)
+               new_offset = new_offset * obs_size
+               obs_pos = init_pos + new_offset
+               print *, 'obs_pos: ', obs_pos
                io = fseek(file_id, obs_pos, 0)
                x = (total_obs - rem) + my_pe + 1
                ! print *, x
@@ -1458,18 +1464,22 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-if (my_task_id() == 0) then
-    i = 1
-    do while (i /= -1)
-        call get_obs_dist(i, test_obs)
-        ! call print_obs(test_obs)
-        ! print *, 'i = ', i 
-        if (modulo(test_obs%key, 1000000) == 0) then
-            print *, 'i = ', i
-        endif
-        i = test_obs%next_time
-    enddo
-endif
+
+! if (my_task_id() < 8) then
+!     dunkus = (64000000 / 8)
+!     i = (dunkus * my_task_id()) + 1
+!     j = i + dunkus - 1
+!     do while (i /= j)
+!         call get_obs_dist(i, test_obs)
+!         ! call print_obs(test_obs)
+!         ! print *, 'i = ', i 
+!         ! if (modulo(test_obs%key, 1000000) == 0) then
+!         !     print *, 'i = ', i
+!         ! endif
+!         i = test_obs%next_time
+!     enddo
+! endif
+
 
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 

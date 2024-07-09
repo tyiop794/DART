@@ -83,6 +83,7 @@ module obs_dist_mod
         ! will be accessed whenever a process attempts a one-sided get
         type(obs_values_qc_type), pointer       :: val_buf(:) => NULL()
         type(obs_type_send), pointer            :: obs_buf(:) => NULL()
+        ! real(r8), pointer                       :: obs_reals(:) => NULL()
         integer                                 :: obs_mpi
         integer                                 :: val_mpi
         integer                                 :: num_obs_per_proc
