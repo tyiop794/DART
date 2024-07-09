@@ -108,6 +108,7 @@ type obs_sequence_type
    character(len=metadatalength), allocatable :: qc_meta_data(:) 
    integer :: first_time
    integer :: last_time
+   integer, allocatable        :: keys(:)
 !   integer :: first_avail_time, last_avail_time
    type(obs_type), allocatable :: obs(:)
 ! What to do about groups
@@ -189,7 +190,8 @@ seq%max_num_obs = expected_max_num_obs
 
 allocate(seq%copy_meta_data(seq%num_copies), &
          seq%qc_meta_data(seq%num_qc), &
-         seq%obs(seq%max_num_obs) )
+         seq%obs(seq%max_num_obs), &
+         seq%keys(seq%max_num_obs))
 
 do i = 1, seq%num_copies
    seq%copy_meta_data(i) = 'Copy metadata not initialized'
@@ -1430,12 +1432,13 @@ if (my_pe >= 0) then
         ! Also set the key in the obs
         ! Make sure the key is absolute, not relative to the observations being read by this proc
            buffer(j)%key = x
+           seq%keys(j) = x
            x = x + 1
            if (j >= num_obs_per_proc) then
                new_offset = ((total_obs - rem) + my_pe)
                new_offset = new_offset * obs_size
                obs_pos = init_pos + new_offset
-               print *, 'obs_pos: ', obs_pos
+               ! print *, 'obs_pos: ', obs_pos
                io = fseek(file_id, obs_pos, 0)
                x = (total_obs - rem) + my_pe + 1
                ! print *, x
@@ -1451,9 +1454,12 @@ if (my_pe >= 0) then
          ! enddo
        ! endif
     enddo
+    if (j > num_obs_per_proc .and. my_obs == num_obs_per_proc) then
+        seq%keys(j) = -1
+    endif
 endif
 
-print *, 'Process ', my_pe, ' reached barrier'
+! print *, 'Process ', my_pe, ' reached barrier'
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
@@ -1464,6 +1470,7 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
+call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
 
 ! if (my_task_id() < 8) then
 !     dunkus = (64000000 / 8)

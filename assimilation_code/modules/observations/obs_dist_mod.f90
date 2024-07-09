@@ -253,7 +253,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
         call sort_obs_send_by_time(all_conv_set, all_values_qc, num_values, num_obs)
         print *, 'sorted by time (timestamp added)'
         ! call sort_roundrobin_inplace(all_conv_set, all_values_qc, num_obs, num_values, nprocs)
-        print *, 'sorted with roundrobin dist'
+        ! print *, 'sorted with roundrobin dist'
     endif
 
     call mpi_barrier(MPI_COMM_WORLD, ierror)
