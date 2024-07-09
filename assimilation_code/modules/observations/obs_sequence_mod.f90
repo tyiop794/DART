@@ -1233,7 +1233,7 @@ end subroutine write_obs_seq
 !------------------------------------------------------------------
 
 subroutine destroy_obs_mpi(mpi_obstype)
-    integer,                    intent(in)       :: mpi_obstype
+    integer,                    intent(inout)       :: mpi_obstype
     integer                                      :: ierror
 
     call mpi_type_free(mpi_obstype, ierror)
