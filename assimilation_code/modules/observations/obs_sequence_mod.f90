@@ -1770,8 +1770,8 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
         print *, 'after gather'
         call sort_obs_send_by_time(all_conv_set, all_values_qc, num_values, num_obs)
         print *, 'sorted by time (timestamp added)'
-        call sort_roundrobin_inplace(all_conv_set, all_values_qc, num_obs, num_values, nprocs)
-        print *, 'sorted with roundrobin dist'
+        ! call sort_roundrobin_inplace(all_conv_set, all_values_qc, num_obs, num_values, nprocs)
+        ! print *, 'sorted with roundrobin dist'
     endif
 
     call mpi_barrier(MPI_COMM_WORLD, ierror)
@@ -1784,7 +1784,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     call scatter_obs_varied(new_conv_set, all_conv_set, new_values_qc, all_values_qc, obs_mpi, vals_mpi, num_values, num_obs, &
         nprocs)
 
-    call deallocate_obs_set(new_set, 1, num_values)
+    ! call deallocate_obs_set(new_set, 1, num_values)
     call allocate_obs_set(new_set, obs_per_proc, num_values)
 
     call mpi_barrier(MPI_COMM_WORLD, ierror)
@@ -2677,10 +2677,10 @@ if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 if (my_task_id() == 0) then
     ! allocate(full_buf(num_alloc * task_count())
     ! call allocate_obs_set(full_buf, num_alloc*task_count(), total_copies)
-    call allocate_obs_set(full_buf, shifted_alloc*task_count(), total_copies)
+    ! call allocate_obs_set(full_buf, shifted_alloc*task_count(), total_copies)
     ! call allocate_obs_set(full_buf, shifted_alloc*num_obs, total_copies)
 else
-    call allocate_obs_set(full_buf, 1, total_copies)
+    ! call allocate_obs_set(full_buf, 1, total_copies)
 endif
 if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
 if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
