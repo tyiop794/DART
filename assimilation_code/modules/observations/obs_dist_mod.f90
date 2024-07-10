@@ -95,6 +95,8 @@ module obs_dist_mod
         integer                                 :: nprocs   
         integer                                 :: obs_win
         integer                                 :: val_win
+        integer                                 :: mpi_time
+        integer                                 :: ngets
     end type obs_dist_type
     type(obs_dist_type) :: odt
     ! integer :: obs_win, val_win
@@ -308,6 +310,8 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     odt%total_obs = total_obs
     odt%rem = rem
     odt%my_pe = my_task_id()
+    odt%ngets = 0
+    odt%mpi_time = 0.0
 
     ! setup our datatypes
     call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
@@ -339,6 +343,7 @@ subroutine get_obs_dist(key, obs)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
     integer                                         :: ierror
+    real(r8)                                        :: start, end
     type(obs_type)                                  :: obs_arr(1)
 
     allocate(obs_buffer(1))
@@ -347,7 +352,7 @@ subroutine get_obs_dist(key, obs)
     ! if it is not, we do not need to perform a one-sided comm
 
     if (key > odt%total_obs - odt%rem) then
-        print *, 'different calculations here'
+        ! print *, 'different calculations here'
         obs_pe = modulo(key, odt%num_obs_per_proc) - 1
         obs_offset = odt%num_obs_per_proc
         val_offset = obs_offset * odt%num_vals_per_obs
@@ -361,9 +366,13 @@ subroutine get_obs_dist(key, obs)
         obs_buffer(1) = odt%obs_buf(obs_offset + 1)
         vals_buffer(1:odt%num_vals_per_obs) = odt%val_buf(val_offset+1:val_offset+odt%num_vals_per_obs)
     else
-        call mpi_win_lock(MPI_LOCK_SHARED, obs_pe, 0, odt%obs_win, ierror)
-        call mpi_win_lock(MPI_LOCK_SHARED, obs_pe, 0, odt%val_win, ierror)
+        call mpi_win_lock(MPI_LOCK_EXCLUSIVE, obs_pe, MPI_MODE_NOCHECK, odt%obs_win, ierror)
+        call mpi_win_lock(MPI_LOCK_EXCLUSIVE, obs_pe, MPI_MODE_NOCHECK, odt%val_win, ierror)
+        ! start = mpi_wtime()
         call mpi_get(obs_buffer, 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
+        ! end = mpi_wtime()
+        ! odt%mpi_time = odt%mpi_time + (end - start)
+        ! odt%ngets = odt%ngets + 1
         call mpi_get(vals_buffer, odt%num_vals_per_obs, odt%val_mpi, obs_pe, val_offset, odt%num_vals_per_obs, odt%val_mpi, odt%val_win, ierror)
         call mpi_win_unlock(obs_pe, odt%obs_win, ierror)
         call mpi_win_unlock(obs_pe, odt%val_win, ierror)
@@ -1004,6 +1013,73 @@ subroutine convert_obs_set(orig, out_obs, out_vals, num_values, num_obs)
 end subroutine convert_obs_set
 !------------------------------------------------------------------
 
+!------------------------------------------------------------------
+subroutine convert_obs_set_alt(orig, out_obs, out_vals, num_values, num_obs)
+    type(obs_type),             intent(inout)  :: orig(:)
+    type(obs_type_send),        intent(inout) :: out_obs(:)
+    type(obs_values_qc_type),   intent(inout) :: out_vals(:)
+    integer,          intent(in)  :: num_values
+    integer,          intent(in)  :: num_obs
+
+    integer :: i, d, j, seconds, days, diff
+    real(r8)    :: location(3)
+    integer     :: which_vert
+    type(location_type)  :: orig_location
+    type(obs_def_type)   :: obs_def
+    type(time_type)      :: obs_time
+
+
+    do i = 1, num_obs
+
+        ! get obs_def
+        call get_obs_def(orig(i), obs_def)
+
+        ! get location
+        orig_location = get_obs_def_location(obs_def)
+        location = get_location(orig_location)
+        out_obs(i)%lon = location(1)
+        out_obs(i)%lat = location(2)
+        out_obs(i)%vloc = location(3)
+        out_obs(i)%which_vert = nint(query_location(orig_location))
+
+        ! get time
+        obs_time = get_obs_def_time(obs_def)
+        call get_time(obs_time, seconds, days)
+        out_obs(i)%seconds = seconds
+        out_obs(i)%days = days
+
+        ! get other values
+        out_obs(i)%kind = get_obs_def_type_of_obs(obs_def)
+        out_obs(i)%key = orig(i)%key
+        out_obs(i)%prev_time = orig(i)%prev_time
+        out_obs(i)%next_time = orig(i)%next_time
+        out_obs(i)%cov_group = orig(i)%cov_group
+        out_obs(i)%error_variance = get_obs_def_error_variance(obs_def)
+        out_obs(i)%obs_def_key = get_obs_def_key(obs_def)
+
+    enddo
+
+    d = 1
+    diff = num_values - 1 
+    do i = 1, num_obs
+        ! values
+        ! values_qc(d:d+diff) = set(i)%values(1:num_values)
+        do j = 1, num_values
+            out_vals(j+d-1)%val = orig(i)%values(j)
+            out_vals(j+d-1)%qc = orig(i)%qc(j)
+        enddo
+        ! values_qc(d:d+diff)%qc = set(i)%qc(1:num_values)
+
+        ! qc
+        ! l = d + num_values
+        ! values_qc(l:l+diff) = set(i)%qc(1:num_values)
+        
+        ! increment our offset
+        d = d + (num_values)
+    enddo 
+
+end subroutine convert_obs_set_alt
+!------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine print_obs_send(obs_send)
     type(obs_type_send),            intent(in)      :: obs_send
