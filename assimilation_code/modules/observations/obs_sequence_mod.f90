@@ -2769,9 +2769,9 @@ if (my_pe == 0) then
         !     return
         ! endif
         i = next_time
-        ! if (modulo(i, 1000000) == 0) then
-        !     print *, 'i = ', i
-        ! endif
+        if (modulo(i, 1000000) == 0) then
+            print *, 'i = ', i
+        endif
         ! if (i == 64000000) then
         !     exit
         ! endif
