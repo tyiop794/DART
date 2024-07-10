@@ -1266,7 +1266,9 @@ character(len=32) :: read_format
 character(len=4) :: test_line
 character(len=128) :: test_line_two
 logical :: dummy
-integer :: dunkus
+! integer :: dunkus
+integer :: cnt
+real(r8) :: mpi_time, start, end, avg, avg_only_gets
 
 ! Use read_obs_seq_header to get file format and header info
 ! KY Header can be read by all processes
@@ -1470,23 +1472,45 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
+! call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
 
-if (my_task_id() < 8) then
-    dunkus = (64000000 / 8)
-    i = (dunkus * my_task_id()) + 1
-    j = i + dunkus - 1
-    do while (i /= j)
+! if (my_task_id() < 8) then
+!     dunkus = (64000000 / 8)
+!     i = (dunkus * my_task_id()) + 1
+!     j = i + dunkus - 1
+!     do while (i /= j)
+!         call get_obs_dist(i, test_obs)
+!         ! call print_obs(test_obs)
+!         ! print *, 'i = ', i 
+!         ! if (modulo(test_obs%key, 1000000) == 0) then
+!         !     print *, 'i = ', i
+!         ! endif
+!         i = test_obs%next_time
+!     enddo
+! endif
+
+! call mpi_win_fence(0, odt%obs_win, ierror)
+! call mpi_win_fence(0, odt%val_win, ierror)
+if (my_task_id() == 0) then
+    cnt = 0
+    mpi_time = 0.0
+    do i = 1000000, total_obs
+        start = mpi_wtime()
         call get_obs_dist(i, test_obs)
-        ! call print_obs(test_obs)
-        ! print *, 'i = ', i 
-        ! if (modulo(test_obs%key, 1000000) == 0) then
-        !     print *, 'i = ', i
-        ! endif
-        i = test_obs%next_time
+        if (modulo(i, 1000000) == 0) print *, 'i = ', i
+        end = mpi_wtime()
+        mpi_time = mpi_time + (end - start)
+        cnt = cnt + 1
     enddo
+    avg = mpi_time / real(cnt, r8)
+    ! avg_only_gets = odt%mpi_time / real(odt%ngets, r8)
+    print *, 'Average: ', avg
+    ! print *, 'Average (just mpi_get): ', avg_only_gets
 endif
 
+
+! call mpi_win_fence(0, odt%obs_win, ierror)
+! call mpi_win_fence(0, odt%val_win, ierror)
 
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
