@@ -335,9 +335,30 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
 end subroutine initialize_obs_window
 !------------------------------------------------------------------
 !------------------------------------------------------------------
+subroutine get_obs_loc_info(key, obs_pe, obs_offset, val_offset)
+    integer,            intent(in)          :: key
+    integer,            intent(inout)       :: obs_pe
+    integer,            intent(inout)       :: obs_offset
+    integer,            intent(inout)       :: val_offset
+
+    if (key > odt%total_obs - odt%rem) then
+        ! print *, 'different calculations here'
+        obs_pe = modulo(key, odt%num_obs_per_proc) - 1
+        obs_offset = odt%num_obs_per_proc
+        val_offset = obs_offset * odt%num_vals_per_obs
+    else
+        obs_pe = (key - 1) / odt%num_obs_per_proc
+        obs_offset = (modulo((key - 1), odt%num_obs_per_proc))
+        val_offset = obs_offset * odt%num_vals_per_obs
+    endif
+
+end subroutine get_obs_pe
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine get_obs_dist(key, obs)
     integer,                intent(in)              :: key
-    type(obs_type),         intent(inout)           :: obs
+    type(obs_type_send),         intent(inout)           :: obs
+    ! integer,                intent(inout)           :: obs
     type(obs_type_send),allocatable                 :: obs_buffer(:)
     type(obs_values_qc_type),allocatable            :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc
@@ -351,35 +372,28 @@ subroutine get_obs_dist(key, obs)
     ! todo: also determine whether the obs we are looking for is on another process
     ! if it is not, we do not need to perform a one-sided comm
 
-    if (key > odt%total_obs - odt%rem) then
-        ! print *, 'different calculations here'
-        obs_pe = modulo(key, odt%num_obs_per_proc) - 1
-        obs_offset = odt%num_obs_per_proc
-        val_offset = obs_offset * odt%num_vals_per_obs
-    else
-        obs_pe = (key - 1) / odt%num_obs_per_proc
-        obs_offset = (modulo((key - 1), odt%num_obs_per_proc))
-        val_offset = obs_offset * odt%num_vals_per_obs
-    endif
+    call get_obs_loc_info(key, obs_pe, obs_offset, val_offset)
 
     if (obs_pe == odt%my_pe) then
-        obs_buffer(1) = odt%obs_buf(obs_offset + 1)
+        ! obs_buffer(1) = odt%obs_buf(obs_offset + 1)
+        obs = odt%obs_buf(obs_offset + 1)
         vals_buffer(1:odt%num_vals_per_obs) = odt%val_buf(val_offset+1:val_offset+odt%num_vals_per_obs)
     else
-        call mpi_win_lock(MPI_LOCK_EXCLUSIVE, obs_pe, MPI_MODE_NOCHECK, odt%obs_win, ierror)
-        call mpi_win_lock(MPI_LOCK_EXCLUSIVE, obs_pe, MPI_MODE_NOCHECK, odt%val_win, ierror)
+        ! call mpi_win_lock(MPI_LOCK_EXCLUSIVE, obs_pe, MPI_MODE_NOCHECK, odt%obs_win, ierror)
+        ! call mpi_win_lock(MPI_LOCK_EXCLUSIVE, obs_pe, MPI_MODE_NOCHECK, odt%val_win, ierror)
         ! start = mpi_wtime()
-        call mpi_get(obs_buffer, 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
+        ! call mpi_get(obs_buffer, 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
+        call mpi_get(obs, 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
         ! end = mpi_wtime()
         ! odt%mpi_time = odt%mpi_time + (end - start)
         ! odt%ngets = odt%ngets + 1
         call mpi_get(vals_buffer, odt%num_vals_per_obs, odt%val_mpi, obs_pe, val_offset, odt%num_vals_per_obs, odt%val_mpi, odt%val_win, ierror)
-        call mpi_win_unlock(obs_pe, odt%obs_win, ierror)
-        call mpi_win_unlock(obs_pe, odt%val_win, ierror)
+        ! call mpi_win_unlock(obs_pe, odt%obs_win, ierror)
+        ! call mpi_win_unlock(obs_pe, odt%val_win, ierror)
     endif
 
     call convert_obs_back(obs_arr, obs_buffer, vals_buffer, 1, odt%num_vals_per_obs)
-    obs = obs_arr(1)
+    ! obs = obs_arr(1)
     deallocate(obs_buffer)
     deallocate(vals_buffer)
 
