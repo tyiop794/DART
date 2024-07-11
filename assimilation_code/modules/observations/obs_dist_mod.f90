@@ -338,8 +338,8 @@ end subroutine initialize_obs_window
 subroutine get_obs_loc_info(key, obs_pe, obs_offset, val_offset)
     integer,            intent(in)          :: key
     integer,            intent(inout)       :: obs_pe
-    integer,            intent(inout)       :: obs_offset
-    integer,            intent(inout)       :: val_offset
+    integer(KIND=MPI_ADDRESS_KIND),            intent(inout)       :: obs_offset
+    integer(KIND=MPI_ADDRESS_KIND),            intent(inout)       :: val_offset
 
     if (key > odt%total_obs - odt%rem) then
         ! print *, 'different calculations here'
@@ -352,7 +352,7 @@ subroutine get_obs_loc_info(key, obs_pe, obs_offset, val_offset)
         val_offset = obs_offset * odt%num_vals_per_obs
     endif
 
-end subroutine get_obs_pe
+end subroutine get_obs_loc_info
 !------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine get_obs_dist(key, obs)
@@ -823,8 +823,8 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
     ! real(r8), allocatable                          :: qc(:)
     type(obs_values_qc_type), allocatable           :: all_values_qc(:)
     type(obs_values_qc_type), allocatable           :: values_qc(:)
-    integer(i8)                                    :: total_values, all_values, vals_per_proc, total_obs
-    integer                                        :: obs_mpi, ierror, i, d, diff, j, l, first, val_mpi
+    integer(i8)                                    :: total_values, all_values, vals_per_proc
+    integer                                        :: obs_mpi, ierror, i, d, diff, j, l, first, val_mpi, total_obs
 
     total_obs = num_obs_per_proc * nprocs
     total_values = num_values * total_obs ! values and qc
@@ -1119,7 +1119,7 @@ subroutine convert_obs_back(recv, simple_obs, simple_val_qc, num_obs, num_values
     type(obs_type_send),        intent(inout) :: simple_obs(:)
     type(obs_values_qc_type),   intent(inout) :: simple_val_qc(:)
     ! integer,          intent(in)  :: num_values
-    integer(i8),          intent(in)  :: num_obs
+    integer,          intent(in)  :: num_obs
 
     integer :: i, d, j, seconds, days
     real(r8)    :: location(3)

@@ -1167,14 +1167,14 @@ end subroutine write_obs_seq
 !------------------------------------------------------------------
 
 !------------------------------------------------------------------
-subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, obs_per_this_proc, num_alloc, rem)
+subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, num_alloc, rem)
     integer(i8),        intent(in)          :: obs_size
     integer(i8),        intent(in)          :: my_pe
     integer,            intent(in)          :: num_obs 
     integer,            intent(in)          :: num_pes
     integer(i8),        intent(in)          :: start_pos
     integer(i8),        intent(out)         :: obs_pos
-    integer,            intent(out)         :: starting_obs, obs_per_this_proc, num_alloc
+    integer,            intent(out)         :: starting_obs, num_alloc
     integer,            intent(inout)       :: rem
     integer(i8)                             :: i, obs_with_rem, obs_per_proc
 
@@ -1186,21 +1186,6 @@ subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos
     starting_obs = 1
     obs_pos = obs_pos + (obs_per_proc * obs_size * (my_pe))
     starting_obs = starting_obs + (obs_per_proc * (my_pe))
-    ! do i = 0, my_pe - 1
-    !     if (i < rem) then
-    !         obs_pos = obs_pos + (obs_with_rem * obs_size)
-    !         starting_obs = starting_obs + obs_with_rem
-    !     else
-    !         obs_pos = obs_pos + (obs_per_proc * obs_size)
-    !         starting_obs = starting_obs + obs_per_proc
-    !     endif
-    ! enddo
-
-    ! if (my_pe < rem) then
-    !     obs_per_this_proc = obs_with_rem
-    ! else
-    !     obs_per_this_proc = obs_per_proc
-    ! endif
     
     num_alloc = obs_with_rem
 
@@ -1254,6 +1239,9 @@ type(obs_type), allocatable :: full_buf_ordered(:)
 type(obs_type), allocatable :: full_buf_rr(:)
 type(obs_type), allocatable :: ordered_buf(:)
 type(obs_type), allocatable :: my_ordered_buf(:)
+type(obs_type_send), allocatable :: full_buf_send(:)
+integer, allocatable        :: next_obs_keys(:)
+integer, allocatable        :: all_next_obs_keys(:)
 type(obs_type), pointer     :: buf_ptr(:)
 !type(obs_type) :: test_obs
 !type(obs_type), allocatable :: ordered(:)
@@ -1297,6 +1285,12 @@ my_pe = my_task_id()
 my_obs = num_obs_per_proc
 if (my_pe < rem) my_obs = my_obs + 1 
 
+allocate(next_obs_keys(my_obs))
+if (my_pe == 0) then 
+    allocate(all_next_obs_keys(total_obs))
+else
+    allocate(all_next_obs_keys(1))
+endif
 ! Get number of threads and nodes
 call get_job_info(nthreads, nnodes)
 
@@ -1382,7 +1376,7 @@ endif
 ! Determine num obs per procs and starting obs
 ! total_obs = num_obs_per_proc * mpi_num
 ! call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, num_obs, init_pos, obs_pos, lower_bound, split_obs, shifted_alloc, grem)
-call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, total_obs, init_pos, obs_pos, lower_bound, split_obs, shifted_alloc, grem)
+call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, total_obs, init_pos, obs_pos, lower_bound, shifted_alloc, grem)
 if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 
 ! Allocate our buffers
@@ -1435,6 +1429,7 @@ if (my_pe >= 0) then
         ! Make sure the key is absolute, not relative to the observations being read by this proc
            buffer(j)%key = x
            seq%keys(j) = x
+           next_obs_keys(j) = buffer(j)%next_time
            x = x + 1
            if (j >= num_obs_per_proc) then
                new_offset = ((total_obs - rem) + my_pe)
@@ -1491,22 +1486,33 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! call mpi_win_fence(0, odt%obs_win, ierror)
 ! call mpi_win_fence(0, odt%val_win, ierror)
+
 if (my_task_id() == 0) then
+    allocate(full_buf_send(num_obs))
+    ! allocate(next_obs_keys(num_obs))
+    call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%obs_win, ierror)
+    ! mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win)
     cnt = 0
     mpi_time = 0.0
-    do i = 1000000, total_obs
+    do i = 1, total_obs
         start = mpi_wtime()
-        call get_obs_dist(i, test_obs)
+        call get_obs_dist(i, full_buf_send(i))
         if (modulo(i, 1000000) == 0) print *, 'i = ', i
         end = mpi_wtime()
         mpi_time = mpi_time + (end - start)
         cnt = cnt + 1
     enddo
+    call mpi_win_unlock_all(odt%obs_win, ierror)
     avg = mpi_time / real(cnt, r8)
     ! avg_only_gets = odt%mpi_time / real(odt%ngets, r8)
     print *, 'Average: ', avg
     ! print *, 'Average (just mpi_get): ', avg_only_gets
 endif
+
+
+! if (my_task_id() == 0) then
+!     call get_obs_dist(1, test_obs)
+! endif
 
 
 ! call mpi_win_fence(0, odt%obs_win, ierror)
