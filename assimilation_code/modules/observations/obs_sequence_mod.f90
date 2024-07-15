@@ -1242,11 +1242,12 @@ type(obs_type), allocatable :: my_ordered_buf(:)
 type(obs_type_send), allocatable :: full_buf_send(:)
 integer, allocatable        :: next_obs_keys(:)
 integer, allocatable        :: all_next_obs_keys(:)
+integer, allocatable        :: keys(:)
 type(obs_type), pointer     :: buf_ptr(:)
 !type(obs_type) :: test_obs
 !type(obs_type), allocatable :: ordered(:)
 integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
-integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nthreads, nnodes, my_offset_pe
+integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nranks, nnodes, my_offset_pe
 integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem, my_obs
 integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos, new_offset
 character(len=16) :: label(2)
@@ -1256,6 +1257,7 @@ character(len=128) :: test_line_two
 logical :: dummy
 ! integer :: dunkus
 integer :: cnt
+integer :: num_to_do
 real(r8) :: mpi_time, start, end, avg, avg_only_gets
 
 ! Use read_obs_seq_header to get file format and header info
@@ -1292,7 +1294,7 @@ else
     allocate(all_next_obs_keys(1))
 endif
 ! Get number of threads and nodes
-call get_job_info(nthreads, nnodes)
+call get_job_info(nranks, nnodes) ! ranks rather than threads
 
 ! obs_per_proc = total_obs / num_split
 ! allocate memory into a buffer
@@ -1377,7 +1379,7 @@ endif
 ! total_obs = num_obs_per_proc * mpi_num
 ! call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, num_obs, init_pos, obs_pos, lower_bound, split_obs, shifted_alloc, grem)
 call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, total_obs, init_pos, obs_pos, lower_bound, shifted_alloc, grem)
-if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
+! if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 
 ! Allocate our buffers
 if (my_task_id() == 0) then
@@ -1388,8 +1390,8 @@ if (my_task_id() == 0) then
 else
     ! call allocate_obs_set(full_buf, 1, total_copies)
 endif
-if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
-if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
+! if (my_task_id() == 0) print *, 'split_obs(2): ', split_obs
+! if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
 ! call allocate_obs_set(buffer, shifted_alloc, total_copies)
 ! call allocate_obs_set(buffer, num_alloc, total_copies)
 call allocate_obs_set(buffer, num_alloc, total_copies)
@@ -1464,10 +1466,10 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 if (my_task_id() == 0) print *, 'Initializing obs window'
 call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc) 
 
-if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
+! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-! call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
+call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
 
 ! if (my_task_id() < 8) then
 !     dunkus = (64000000 / 8)
@@ -1487,27 +1489,18 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! call mpi_win_fence(0, odt%obs_win, ierror)
 ! call mpi_win_fence(0, odt%val_win, ierror)
 
-if (my_task_id() == 0) then
-    allocate(full_buf_send(num_obs))
-    ! allocate(next_obs_keys(num_obs))
-    call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%obs_win, ierror)
-    ! mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win)
-    cnt = 0
-    mpi_time = 0.0
-    do i = 1, total_obs
-        start = mpi_wtime()
-        call get_obs_dist(i, full_buf_send(i))
-        if (modulo(i, 1000000) == 0) print *, 'i = ', i
-        end = mpi_wtime()
-        mpi_time = mpi_time + (end - start)
-        cnt = cnt + 1
-    enddo
-    call mpi_win_unlock_all(odt%obs_win, ierror)
-    avg = mpi_time / real(cnt, r8)
-    ! avg_only_gets = odt%mpi_time / real(odt%ngets, r8)
-    print *, 'Average: ', avg
-    ! print *, 'Average (just mpi_get): ', avg_only_gets
-endif
+! if (my_task_id() == 1279) then
+!     print *, 'hi! before before'
+!     num_to_do = 100000000
+!     allocate(keys(num_to_do))
+!     allocate(full_buf(num_to_do))
+!     print *, 'hi! before'
+!     do i = 1, num_to_do
+!         keys(i) = i
+!     enddo
+!     print *, 'hi! after'
+!     call get_obs_set(keys, full_buf, num_to_do)
+! endif
 
 
 ! if (my_task_id() == 0) then
