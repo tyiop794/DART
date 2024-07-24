@@ -1223,12 +1223,12 @@ subroutine get_obs_size(file_id, obs_size, num_values, init_pos)
 end subroutine get_obs_size
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine read_obs_seq(file_name, add_copies, add_qc, add_obs, seq)
+subroutine read_obs_seq(file_name, add_copies, add_qc, add_obs, seq, dist_type)
 
 ! Be able to increase size at read in time for efficiency
 
 character(len=*),        intent(in)  :: file_name
-integer,                 intent(in)  :: add_copies, add_qc, add_obs
+integer,                 intent(in)  :: add_copies, add_qc, add_obs, dist_type
 type(obs_sequence_type), intent(out) :: seq
 
 integer :: i, num_copies, num_qc, num_obs, max_num_obs, file_id, io, num_obs_per_proc, rem, mpi_num, num_alloc, num_to_send, my_pe
@@ -1246,7 +1246,7 @@ integer, allocatable        :: keys(:)
 type(obs_type), pointer     :: buf_ptr(:)
 !type(obs_type) :: test_obs
 !type(obs_type), allocatable :: ordered(:)
-integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs 
+integer :: first_time, last_time, abs_start, k, j, l, total_copies, total_obs, ierror, actual_obs, obs_size, split_obs, size
 integer :: lower_bound, upper_bound, obs_per_proc, x, num_split,  pos_diff, nranks, nnodes, my_offset_pe
 integer :: num_offset_pes, my_pe_orig, mpi_num_orig, shifted_pe, shifted_nprocs, shifted_alloc, root, grem, my_obs
 integer(i8) :: final_pos, init_pos, total_obs_size, obs_pos, new_offset
@@ -1258,18 +1258,21 @@ logical :: dummy
 ! integer :: dunkus
 integer :: cnt
 integer :: num_to_do
-real(r8) :: mpi_time, start, end, avg, avg_only_gets
+real(r8) :: mpi_time, stime, etime
 
 ! Use read_obs_seq_header to get file format and header info
 ! KY Header can be read by all processes
+! print *, '1'
 call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
    max_num_obs, file_id, read_format, dummy)
 
 ! total_copies = num_copies + add_copies
 ! total_obs = num_obs + add_obs
 
+! print *, '2'
 total_copies = num_copies
 total_obs = num_obs
+if (my_task_id() == 0) print *, 'total_obs: ', total_obs
 root = 0
 
 ! Split by how much?
@@ -1286,13 +1289,14 @@ my_pe = my_task_id()
 
 my_obs = num_obs_per_proc
 if (my_pe < rem) my_obs = my_obs + 1 
+! print *, '3'
 
-allocate(next_obs_keys(my_obs))
-if (my_pe == 0) then 
-    allocate(all_next_obs_keys(total_obs))
-else
-    allocate(all_next_obs_keys(1))
-endif
+! allocate(next_obs_keys(my_obs))
+! if (my_pe == 0) then 
+!     allocate(all_next_obs_keys(total_obs))
+! else
+!     allocate(all_next_obs_keys(1))
+! endif
 ! Get number of threads and nodes
 call get_job_info(nranks, nnodes) ! ranks rather than threads
 
@@ -1305,9 +1309,10 @@ call get_job_info(nranks, nnodes) ! ranks rather than threads
 !allocate(ordered(num_alloc))
 ! Let's try only allocating limited amounts of memory...for testing purposes
 call init_obs_sequence(seq, num_copies + add_copies, &
-   num_qc + add_qc, num_alloc)
+   num_qc + add_qc, 1)
 
 ! Set the number of obs available at present
+! print *, '4'
 seq%num_obs = num_obs
 
 ! Get the available copy_meta_data
@@ -1394,7 +1399,9 @@ endif
 ! if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
 ! call allocate_obs_set(buffer, shifted_alloc, total_copies)
 ! call allocate_obs_set(buffer, num_alloc, total_copies)
+if (my_task_id() == 0) print *, 'starting allocation'
 call allocate_obs_set(buffer, num_alloc, total_copies)
+if (my_task_id() == 0) print *, 'finishing allocation'
 ! print *, num_obs_per_proc
 ! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
 ! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
@@ -1414,6 +1421,9 @@ if (my_pe >= 0) then
     ! print *, 'hi!'
     ! do j = 1, num_obs
     do j = 1, my_obs
+        if (modulo(j, 1000000) == 0 .and. mpi_num == 1) then
+            print *, 'j = ', j
+        endif
        ! if observation is in our set, read
        ! no need to read if we are past our upper bound
        ! if (j > upper_bound) exit
@@ -1426,12 +1436,12 @@ if (my_pe >= 0) then
               call error_handler(E_ERR, 'read_obs_seq', string1, source)
            endif
            call read_obs(file_id, num_copies, add_copies, num_qc, add_qc, j, buffer(j), &
-              read_format, total_obs)
+              read_format, 999999999)
         ! Also set the key in the obs
         ! Make sure the key is absolute, not relative to the observations being read by this proc
            buffer(j)%key = x
-           seq%keys(j) = x
-           next_obs_keys(j) = buffer(j)%next_time
+           ! seq%keys(j) = x
+           ! next_obs_keys(j) = buffer(j)%next_time
            x = x + 1
            if (j >= num_obs_per_proc) then
                new_offset = ((total_obs - rem) + my_pe)
@@ -1441,6 +1451,9 @@ if (my_pe >= 0) then
                io = fseek(file_id, obs_pos, 0)
                x = (total_obs - rem) + my_pe + 1
                ! print *, x
+           endif
+           if (buffer(j)%key == total_obs) then
+               buffer(j)%next_time = -1
            endif
            ! create separate arrays so that values and qc can be sent contiguously
            ! better to calculate this when we've already decided the order in which array will be sent
@@ -1453,9 +1466,9 @@ if (my_pe >= 0) then
          ! enddo
        ! endif
     enddo
-    if (j > num_obs_per_proc .and. my_obs == num_obs_per_proc) then
-        seq%keys(j) = -1
-    endif
+    ! if (j > num_obs_per_proc .and. my_obs == num_obs_per_proc) then
+    !     seq%keys(j) = -1
+    ! endif
 endif
 
 ! print *, 'Process ', my_pe, ' reached barrier'
@@ -1463,13 +1476,20 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
 ! total_obs = num_obs_per_proc * mpi_num
+! if (mpi_num > 1) then
 if (my_task_id() == 0) print *, 'Initializing obs window'
-call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc) 
+call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type) 
 
 ! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
+if (dist_type == 0) then
+    call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
+else
+    deallocate(buffer)
+endif
+
+! endif
 
 ! if (my_task_id() < 8) then
 !     dunkus = (64000000 / 8)
@@ -1486,34 +1506,56 @@ call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
 !     enddo
 ! endif
 
+! call mpi_win_lock_all(0, odt%obs_win, ierror)
+! call mpi_win_fence(0, odt%val_win, ierror)
+
+
+size = 1
+total_obs = total_obs / size
+if (my_task_id() < size .and. dist_type == 1) then
+    ! jcall mpi_win_lock_all(MPI_MODE_NOCHECK, odt%obs_win, ierror)
+    ! call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win, ierror)
+    allocate(keys(total_obs))
+    allocate(full_buf(total_obs))
+
+    ! j = 0
+    ! i = 1
+    ! do while (j < total_obs)
+    !     call get_obs_dist(i, test_obs)
+    !     if (modulo(i, 1000000) == 0) print *, 'test_obs%key: ', test_obs%key
+    !     i = test_obs%next_time
+    !     j = j + 1
+    ! enddo
+    
+    do i = 1, total_obs 
+        keys(i) = i + ((total_obs) * my_task_id())
+    enddo
+    stime = mpi_wtime()
+    call get_obs_set(keys, full_buf, total_obs)
+    etime = mpi_wtime()
+    ! do i = 1, total_obs 
+    !     ! if (modulo(i, 1000000) == 0) then
+    !     !     print *, 'key = ', full_buf(i)%key
+    !     ! endif
+    ! enddo
+
+    print *, 'Total time (', total_obs, ' obs): ', etime - stime
+    ! call mpi_win_unlock_all(odt%obs_win, ierror)
+    ! call mpi_win_unlock_all(odt%val_win, ierror)
+endif
+
 ! call mpi_win_fence(0, odt%obs_win, ierror)
 ! call mpi_win_fence(0, odt%val_win, ierror)
 
-! if (my_task_id() == 1279) then
-!     print *, 'hi! before before'
-!     num_to_do = 100000000
-!     allocate(keys(num_to_do))
-!     allocate(full_buf(num_to_do))
-!     print *, 'hi! before'
-!     do i = 1, num_to_do
-!         keys(i) = i
-!     enddo
-!     print *, 'hi! after'
-!     call get_obs_set(keys, full_buf, num_to_do)
-! endif
-
+call mpi_barrier(MPI_COMM_WORLD, ierror)
+call destroy_obs_window()
 
 ! if (my_task_id() == 0) then
 !     call get_obs_dist(1, test_obs)
 ! endif
 
 
-! call mpi_win_fence(0, odt%obs_win, ierror)
-! call mpi_win_fence(0, odt%val_win, ierror)
 
-call mpi_barrier(MPI_COMM_WORLD, ierror)
-
-call destroy_obs_window()
 
 ! if (my_task_id() == 0) print *, 'Made it to gather'
 

@@ -97,6 +97,7 @@ module obs_dist_mod
         integer                                 :: val_win
         integer                                 :: mpi_time
         integer                                 :: ngets
+        integer                                 :: dist_type
     end type obs_dist_type
     type(obs_dist_type) :: odt
     ! integer :: obs_win, val_win
@@ -186,6 +187,8 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     ! Convert to a struct with fully contiguous memory 
     call convert_obs_set(set, conv_set, values_qc, num_values, gather_obs_per_proc)
 
+    call deallocate_obs_set(set, obs_per_proc + 1, num_values)
+
     ! Setup the dedicated data structure
     ! call setup_obs_mpi(obs_mpi, vals_mpi)
     
@@ -258,6 +261,8 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
         ! print *, 'sorted with roundrobin dist'
     endif
 
+    deallocate(conv_set)
+    deallocate(values_qc)
     call mpi_barrier(MPI_COMM_WORLD, ierror)
 
     rem = modulo(num_obs, nprocs)
@@ -276,13 +281,11 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     call convert_obs_back(new_set, new_conv_set, new_values_qc, obs_per_proc, num_values)
     ! After send has completed, destroy the mpi struct datatype and deallocate memory
     ! call destroy_obs_mpi(obs_mpi, vals_mpi)
-    if (my_task_id() == root) then
-        deallocate(all_conv_set)
-        deallocate(all_values_qc)
-    endif
+    deallocate(all_conv_set)
+    deallocate(all_values_qc)
 
-    deallocate(conv_set)
-    deallocate(values_qc)
+    ! deallocate(conv_set)
+    ! deallocate(values_qc)
     deallocate(disp)
     deallocate(count)
     deallocate(disp_vals)
@@ -343,20 +346,23 @@ integer function get_obs_offset(key)
 end function get_obs_offset
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc)
+subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc, dist_type)
     ! this will initialize the obs window for one-sided communication
     type(obs_type),          intent(inout)      :: buffer(:)
     integer,                 intent(in)         :: num_obs_per_proc
     integer,                 intent(in)         :: total_obs
     integer,                 intent(in)         :: rem
     integer,                 intent(in)         :: num_alloc
+    integer,                 intent(in)         :: dist_type
     integer                                     :: ierror
     integer                                     :: num_vals
 
     ! allocate our buffers to be number of obs on this process
-    ! allocate(odt%obs_buf(num_alloc))
     num_vals = num_obs_per_proc * num_vals_per_obs
-    ! allocate(odt%val_buf(num_alloc*num_vals_per_obs))
+    if (dist_type == 1) then
+        allocate(odt%obs_buf(num_alloc))
+        allocate(odt%val_buf(num_alloc*num_vals_per_obs))
+    endif
     odt%num_obs_per_proc = num_obs_per_proc
     odt%num_vals_per_proc = num_vals
     odt%total_obs = total_obs
@@ -364,21 +370,24 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     odt%my_pe = my_task_id()
     odt%ngets = 0
     odt%mpi_time = 0.0
+    odt%dist_type = dist_type
 
     ! setup our datatypes
     call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
 
     ! convert to sendable datatype
-    ! call convert_obs_set(buffer, odt%obs_buf, odt%val_buf, num_vals_per_obs, num_alloc)
+    if (dist_type == 1) then
+        call convert_obs_set(buffer, odt%obs_buf, odt%val_buf, num_vals_per_obs, num_alloc)
 
-    ! create windows
-    ! call mpi_win_create(odt%obs_buf, num_alloc * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
-    ! odt%obs_win, &
-    ! ierror)
+        ! create windows
+        call mpi_win_create(odt%obs_buf, num_alloc * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+        odt%obs_win, &
+        ierror)
 
-    ! call mpi_win_create(odt%val_buf, num_alloc * num_vals_per_obs * sizeof(odt%val_buf(1)), sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
-    ! odt%val_win, &
-    ! ierror)
+        call mpi_win_create(odt%val_buf, num_alloc * num_vals_per_obs * sizeof(odt%val_buf(1)), sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+        odt%val_win, &
+        ierror)
+    endif
     ! if (odt%my_pe == 0) print *, ierror
 
     ! call mpi_win_free(odt%obs_win, ierror)
@@ -438,16 +447,21 @@ subroutine get_obs_dist(key, obs)
         ! start = mpi_wtime()
         ! call mpi_get(obs_buffer, 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
         call mpi_get(obs_buffer, 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
+        ! call mpi_win_flush(obs_pe, odt%obs_win, ierror)
+        ! call mpi_win_flush(obs_pe, odt%obs_win, ierror)
         ! end = mpi_wtime()
         ! odt%mpi_time = odt%mpi_time + (end - start)
         ! odt%ngets = odt%ngets + 1
         call mpi_get(vals_buffer, odt%num_vals_per_obs, odt%val_mpi, obs_pe, val_offset, odt%num_vals_per_obs, odt%val_mpi, odt%val_win, ierror)
+        ! call mpi_win_flush(obs_pe, odt%val_win, ierror)
+        ! call mpi_win_flush_local(obs_pe, odt%obs_win, ierror)
+        ! call mpi_win_flush_local(obs_pe, odt%val_win, ierror)
         call mpi_win_unlock(obs_pe, odt%obs_win, ierror)
         call mpi_win_unlock(obs_pe, odt%val_win, ierror)
     endif
 
     call convert_obs_back(obs_arr, obs_buffer, vals_buffer, 1, odt%num_vals_per_obs)
-    ! obs = obs_arr(1)
+    obs = obs_arr(1)
     deallocate(obs_buffer)
     deallocate(vals_buffer)
 
@@ -463,10 +477,11 @@ subroutine get_obs_set(keys, obs, num_keys)
     type(obs_values_qc_type),allocatable            :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc, total_values
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
-    integer                                         :: ierror, i, d
-    real(r8)                                        :: start, end
+    integer                                         :: ierror, i, d, get_cnt
+    real(r8)                                        :: stime, etime, ttime
     ! type(obs_type)                                  :: obs_arr(1)
 
+    get_cnt = 0
     total_values = odt%num_vals_per_obs * num_keys
     allocate(obs_buffer(num_keys))
     allocate(vals_buffer(total_values))
@@ -490,8 +505,17 @@ subroutine get_obs_set(keys, obs, num_keys)
             ! print *, 'keys(', i, '): ', keys(i)
             ! print *, 'obs_offset: ', obs_offset
             ! print *, 'val_offset: ', val_offset
+            stime = MPI_WTime()
             call mpi_get(obs_buffer(i), 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
+            etime = MPI_WTime()
+            ttime = ttime + (etime - stime)
+
+            stime = MPI_WTime()
             call mpi_get(vals_buffer(d+1:d+odt%num_vals_per_obs), odt%num_vals_per_obs, odt%val_mpi, obs_pe, val_offset, odt%num_vals_per_obs, odt%val_mpi, odt%val_win, ierror)
+            etime = MPI_WTime()
+            ttime = ttime + (etime - stime)
+
+            get_cnt = get_cnt + 2
         endif
         if (modulo(i, 1000000) == 0) print *, 'i = ', i
         ! print *, 'i = ', i
@@ -500,10 +524,14 @@ subroutine get_obs_set(keys, obs, num_keys)
     ! odt%mpi_time = odt%mpi_time + (end - start)
     ! odt%ngets = odt%ngets + 1
     ! call mpi_get(vals_buffer, odt%num_vals_per_obs, odt%val_mpi, obs_pe, val_offset, odt%num_vals_per_obs, odt%val_mpi, odt%val_win, ierror)
+    ! call mpi_win_flush_local_all(odt%obs_win, ierror)
+    ! call mpi_win_flush_local_all(odt%val_win, ierror)
     call mpi_win_unlock_all(odt%obs_win, ierror)
     call mpi_win_unlock_all(odt%val_win, ierror)
 
     call convert_obs_back(obs, obs_buffer, vals_buffer, num_keys, odt%num_vals_per_obs)
+
+    print *, 'Average time to get: ', ttime / get_cnt
     ! obs = obs_arr(1)
     deallocate(obs_buffer)
     deallocate(vals_buffer)
@@ -515,11 +543,13 @@ end subroutine get_obs_set
 subroutine destroy_obs_window()
     ! this will destroy the obs window (it's in the name, chief)
     integer :: ierror
-    ! call mpi_win_free(odt%obs_win, ierror)
-    ! call mpi_win_free(odt%val_win, ierror)
     call destroy_obs_mpi(odt%obs_mpi, odt%val_mpi)
-    ! deallocate(odt%val_buf)
-    ! deallocate(odt%obs_buf)
+    if (odt%dist_type == 1) then
+        call mpi_win_free(odt%obs_win, ierror)
+        call mpi_win_free(odt%val_win, ierror)
+        deallocate(odt%val_buf)
+        deallocate(odt%obs_buf)
+    endif
 end subroutine destroy_obs_window
 
 !------------------------------------------------------------------
@@ -655,6 +685,7 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     j = 1
     k = 1
     do while (i /= -1)
+        ! if (modulo(i, 10000) == 0) print *, 'i = ', i
         l = get_obs_offset(i)
 
         obs_set(l)%time_order = j 
@@ -682,7 +713,9 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     sizeof_val = sizeof(values_qc(1))
     sizeof_obs = sizeof(obs_set(1))
 
+    print *, 'sort 1'
     call qsort(c_loc(obs_set(1)), int(num_obs, c_size_t), sizeof_obs, c_funloc(compare_obs))
+    print *, 'sort 2'
     call qsort(c_loc(values_qc(1)), int(num_obs, c_size_t), sizeof_val, c_funloc(compare_vals))
     
 
