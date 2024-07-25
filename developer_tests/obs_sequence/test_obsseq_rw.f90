@@ -1,5 +1,6 @@
 program test_obsseq_rw
 
+use mpi
 use        types_mod,  only : r8, missing_r8, metadatalength
 
 use    utilities_mod,  only : register_module, initialize_utilities,        &
@@ -21,7 +22,8 @@ use mpi_utilities_mod, only : initialize_mpi_utilities, my_task_id,         &
 use obs_sequence_mod,  only : obs_sequence_type, obs_type, write_obs_seq,   &
                               read_obs_seq, read_obs_seq_header, init_obs,  &
                               init_obs_sequence, static_init_obs_sequence,  &
-                              validate_obs_seq_time, add_qc, set_qc_meta_data
+                              validate_obs_seq_time, add_qc, set_qc_meta_data, &
+                              destroy_obs_sequence
 
 use filter_mod,        only : get_blank_qc_index, get_obs_qc_index, get_obs_dartqc_index, &
                               filter_generate_copy_meta_data              
@@ -31,7 +33,8 @@ implicit none
 type(obs_sequence_type) :: seq
 integer                 :: num_copies_in, tnum_qc
 integer                 :: num_obs_in, max_num_obs
-integer                 :: file_id
+real(r8)                :: stime, etime, ttime 
+integer                 :: file_id, d, ierror
 character(len=128)      :: read_format
 logical                 :: pre_I_format, cal
 character(len=256)      :: msgstring, msgstring1, msgstring2
@@ -64,6 +67,10 @@ integer :: iunit, io
 
 call initialize_mpi_utilities('test_obsseq_rw')
 
+do d = 1, 1 
+if (my_task_id() == 0) then
+    print *, 'd = ', d
+endif
 ! read namelist entries
 call find_namelist_in_file("input.nml", "test_obsseq_rw_nml", iunit)
 read(iunit, nml = test_obsseq_rw_nml, iostat = io)
@@ -111,7 +118,11 @@ endif
 
 ! Read in with enough space for diagnostic output values and add'l qc field(s)
 ! ONLY ADD SPACE ON TASK 0.  everyone else just read in the original obs_seq file.
-call read_obs_seq(file_in, copies_num_inc, qc_num_inc, 0, seq)
+
+stime = mpi_wtime()
+call read_obs_seq(file_in, copies_num_inc, qc_num_inc, 0, seq, 0)
+etime = mpi_wtime()
+if (my_task_id() == 0) print *, 'Total time: ', etime - stime
 
 call filter_generate_copy_meta_data(seq, num_copies_in, &
         prior_obs_mean_index, posterior_obs_mean_index, &
@@ -156,9 +167,15 @@ endif
 
 call task_sync()
 
-if (my_task_id() == 0) then
-   call write_obs_seq(seq, file_out)
-endif
+call destroy_obs_sequence(seq)
+call mpi_barrier(MPI_COMM_WORLD, ierror)
+
+enddo
+
+! if (my_task_id() == 0) then
+!    call write_obs_seq(seq, file_out)
+! endif
+
 
 call finalize_mpi_utilities()
 
