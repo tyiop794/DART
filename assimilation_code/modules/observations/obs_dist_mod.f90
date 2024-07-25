@@ -549,6 +549,8 @@ subroutine destroy_obs_window()
         call mpi_win_free(odt%val_win, ierror)
         deallocate(odt%val_buf)
         deallocate(odt%obs_buf)
+        odt%val_buf => NULL()
+        odt%obs_buf => NULL()
     endif
 end subroutine destroy_obs_window
 
@@ -1048,69 +1050,6 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
 
 end subroutine gather_obs_set
 !------------------------------------------------------------------
-
-!------------------------------------------------------------------
-subroutine p2p_gather_obs_set(set, total_obs, num_values, root, start_pe, end_pe)
-    type(obs_type),                 intent(inout)       :: set(:)
-    integer,                        intent(inout)       :: num_values
-    integer,                        intent(in)          :: total_obs
-    integer,                        intent(in)          :: root
-    integer,                        intent(in)          :: start_pe, end_pe
-    integer                                             :: obs_per_proc, rem, my_pe, num_send, i, curr_obs, j, ierror, nprocs
-
-    nprocs = (end_pe - start_pe) + 1
-    obs_per_proc = total_obs / nprocs
-    if (my_task_id() == 0) print *, 'obs_per_proc: ', obs_per_proc
-    if (my_task_id() == 0) print *, 'nprocs: ', nprocs
-    rem = modulo(total_obs, nprocs)
-    my_pe = my_task_id()
-    num_send = obs_per_proc
-
-    do i = 0, task_count() - 1
-        ! if (my_task_id() == 0) print *, 'i: ', i
-        if (i >= start_pe .and. i <= end_pe) then
-            if (my_task_id() == root) then
-                curr_obs = 1
-                j = 0
-                do while (j < i)
-                    if (j < rem) then
-                        curr_obs = curr_obs + obs_per_proc + 1
-                    else
-                        curr_obs = curr_obs + obs_per_proc
-                    endif
-                    j = j + 1
-                enddo
-                if (i < rem) then
-                    num_send = num_send + 1
-                endif
-                print *, 'attempting to recv'
-                call recv_obs_set(set(curr_obs:curr_obs+num_send-1), i, num_send, num_values)
-            else if (my_pe == i) then
-                if (my_pe < rem) then
-                    num_send = num_send + 1
-                endif
-                print *, 'attempting to send'
-                call send_obs_set(set(1:num_send), root, num_send, num_values)
-            endif
-        endif
-        call mpi_barrier(MPI_COMM_WORLD, ierror)
-    enddo
-
-    ! call mpi_barrier(MPI_COMM_WORLD, ierror)
-
-
-
-
-end subroutine p2p_gather_obs_set
-!------------------------------------------------------------------
-
-!------------------------------------------------------------------
-subroutine recv_obs(obs, proc)
-    integer,            intent(in)      :: proc
-    type(obs_type),     intent(inout)   :: obs
-
-
-end subroutine recv_obs
 !------------------------------------------------------------------
 subroutine convert_obs_set(orig, out_obs, out_vals, num_values, num_obs)
     type(obs_type),             intent(inout)  :: orig(:)

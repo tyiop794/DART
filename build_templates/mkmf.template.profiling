@@ -133,9 +133,8 @@ LD = ifort
 # NETCDF = /opt/local
 
 INCS = -I$(NETCDF)/include
-LIBS = -L$(NETCDF)/lib -lnetcdff -lnetcdf
-# FFLAGS  = -O -assume buffered_io $(INCS)
-FFLAGS  = -O -assume buffered_io -g -C  -ftrapuv -ftrapuv -traceback -fpe0 $(INCS)
+LIBS = -L$(NETCDF)/lib -lnetcdff -lnetcdf -L$(PWD) -lmap-sampler-pmpi -lmap-sampler -Wl,--eh-frame-hdr -Wl,-rpath=$(PWD)
+FFLAGS  = -g -O0 -assume buffered_io $(INCS)
 LDFLAGS = $(FFLAGS) $(LIBS)
 
 # for development or debugging, use this instead:
