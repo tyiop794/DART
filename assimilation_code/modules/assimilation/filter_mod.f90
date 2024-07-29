@@ -1354,7 +1354,7 @@ endif
 
 ! Read in with enough space for diagnostic output values and add'l qc field(s)
 ! ONLY ADD SPACE ON TASK 0.  everyone else just read in the original obs_seq file.
-call read_obs_seq(obs_sequence_in_name, copies_num_inc, qc_num_inc, 0, seq)
+call read_obs_seq(obs_sequence_in_name, copies_num_inc, qc_num_inc, 0, seq, 0)
 
 ! check to be sure that we have an incoming qc field.  if not, look for
 ! a blank qc field
