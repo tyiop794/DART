@@ -1168,15 +1168,15 @@ end subroutine write_obs_seq
 
 !------------------------------------------------------------------
 subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos, starting_obs, num_alloc, rem)
-    integer(i8),        intent(in)          :: obs_size
-    integer(i8),        intent(in)          :: my_pe
+    integer,        intent(in)          :: obs_size
+    integer,        intent(in)          :: my_pe
     integer,            intent(in)          :: num_obs 
     integer,            intent(in)          :: num_pes
     integer(i8),        intent(in)          :: start_pos
     integer(i8),        intent(out)         :: obs_pos
     integer,            intent(out)         :: starting_obs, num_alloc
     integer,            intent(inout)       :: rem
-    integer(i8)                             :: i, obs_with_rem, obs_per_proc
+    integer(i8)                             :: i, obs_with_rem, obs_per_proc, obs_pos_offset, obs_offset
 
     obs_per_proc = num_obs / num_pes
     rem = modulo(num_obs, num_pes)
@@ -1184,8 +1184,12 @@ subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos
 
     obs_pos = start_pos
     starting_obs = 1
-    obs_pos = obs_pos + (obs_per_proc * obs_size * (my_pe))
-    starting_obs = starting_obs + (obs_per_proc * (my_pe))
+
+    obs_offset = obs_per_proc * my_pe
+    obs_pos_offset = int(obs_size, i8) * int(obs_offset, i8)
+    print *, obs_pos_offset
+    obs_pos = obs_pos + obs_pos_offset
+    starting_obs = starting_obs + obs_offset
     
     num_alloc = obs_with_rem
 
