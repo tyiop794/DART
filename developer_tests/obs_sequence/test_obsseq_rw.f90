@@ -120,7 +120,7 @@ endif
 ! ONLY ADD SPACE ON TASK 0.  everyone else just read in the original obs_seq file.
 
 stime = mpi_wtime()
-call read_obs_seq(file_in, copies_num_inc, qc_num_inc, 0, seq, 0)
+call read_obs_seq(file_in, copies_num_inc, qc_num_inc, 0, seq, 1)
 etime = mpi_wtime()
 if (my_task_id() == 0) print *, 'Total time: ', etime - stime
 
@@ -138,7 +138,7 @@ if (input_qc_index < 0) then
       ! Need 1 new qc field for dummy incoming qc
       call add_qc(seq, 1)
       input_qc_index = get_blank_qc_index(seq)
-      if (input_qc_index < 0) then
+     if (input_qc_index < 0) then
          call error_handler(E_ERR,'filter_setup_obs_sequence', &
            'error adding blank qc field to sequence; should not happen')
       endif

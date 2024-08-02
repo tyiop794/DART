@@ -1482,7 +1482,9 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! total_obs = num_obs_per_proc * mpi_num
 ! if (mpi_num > 1) then
 if (my_task_id() == 0) print *, 'Initializing obs window'
-call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type) 
+call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type, mpi_num) 
+
+! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
@@ -1514,13 +1516,19 @@ endif
 ! call mpi_win_fence(0, odt%val_win, ierror)
 
 
+if (my_task_id() == 1) then
+    print *, odt%val_buf(1)%val
+    print *, odt%val_buf(2)%val
+    print *, odt%val_buf(3)%val
+endif
 size = 1
 total_obs = total_obs / size
 if (my_task_id() < size .and. dist_type == 1) then
     ! jcall mpi_win_lock_all(MPI_MODE_NOCHECK, odt%obs_win, ierror)
     ! call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win, ierror)
     allocate(keys(total_obs))
-    allocate(full_buf(total_obs))
+    ! allocate(full_buf(total_obs))
+    call allocate_obs_set(full_buf, total_obs, num_copies)
 
     ! j = 0
     ! i = 1
@@ -1536,6 +1544,8 @@ if (my_task_id() < size .and. dist_type == 1) then
     enddo
     stime = mpi_wtime()
     call get_obs_set(keys, full_buf, total_obs)
+    
+    ! call get_all_obs_contiguous(full_buf)
     etime = mpi_wtime()
     ! do i = 1, total_obs 
     !     ! if (modulo(i, 1000000) == 0) then

@@ -36,7 +36,6 @@ module obs_dist_mod
     end type obs_type
 
     type obs_values_qc_type
-       private
        integer :: time_order
        real(r8) :: val
        real(r8) :: qc
@@ -46,7 +45,6 @@ module obs_dist_mod
     ! The key is needed to indicate the element number in the storage for the obs_sequence
     ! Do I want to enforce the identity of the particular obs_sequence?
     ! Declare a simplified data structure for sending and receiving using MPI
-       private 
        integer :: key
        ! Remove obs_def_type when sending obs to reduce complexity
        ! type(obs_def_type) :: def
@@ -177,13 +175,10 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
         allocate(all_conv_set(1))
         allocate(all_values_qc(1))
     endif
-    ! allocate(values(total_values * 10))
 
     gather_vals_per_proc = num_values * gather_obs_per_proc
-    ! if (gather_proc < rem) gather_vals_per_proc = gather_vals_per_proc + (num_values)
     allocate(conv_set(gather_obs_per_proc))
     allocate(values_qc(gather_vals_per_proc))
-    ! allocate(qc(total_values * 10))
     
     ! Convert to a struct with fully contiguous memory 
     call convert_obs_set(set, conv_set, values_qc, num_values, gather_obs_per_proc)
@@ -191,10 +186,10 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     call deallocate_obs_set(set, obs_per_proc + 1, num_values)
 
     ! Setup the dedicated data structure
+    ! already performed by initialize_obs_window
     ! call setup_obs_mpi(obs_mpi, vals_mpi)
     
     ! retrieve the observations and calculate displacement
-    ! call mpi_barrier(MPI_COMM_WORLD, ierror)
     call gather_obs_varied(all_conv_set, conv_set, all_values_qc, values_qc, odt%obs_mpi, odt%val_mpi, num_values, num_obs, & 
         nprocs)
 
@@ -280,7 +275,7 @@ integer function get_obs_offset(key)
 end function get_obs_offset
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc, dist_type)
+subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc, dist_type, nprocs)
     ! this will initialize the obs window for one-sided communication
     type(obs_type),          intent(inout)      :: buffer(:)
     integer,                 intent(in)         :: num_obs_per_proc
@@ -288,6 +283,7 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     integer,                 intent(in)         :: rem
     integer,                 intent(in)         :: num_alloc
     integer,                 intent(in)         :: dist_type
+    integer,                 intent(in)         :: nprocs
     integer                                     :: ierror
     integer                                     :: num_vals
 
@@ -301,9 +297,11 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     ! set important variables related to observation distribution
     odt%num_obs_per_proc = num_obs_per_proc
     odt%num_vals_per_proc = num_vals
+    odt%num_vals_per_obs = num_vals_per_obs
     odt%total_obs = total_obs
     odt%rem = rem
     odt%my_pe = my_task_id()
+    odt%nprocs = nprocs
     odt%ngets = 0
     odt%mpi_time = 0.0
     odt%dist_type = dist_type
@@ -399,57 +397,83 @@ subroutine get_obs_dist(key, obs)
 end subroutine get_obs_dist
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine get_all_obs_contiguous(keys, obs, num_keys)
-    integer,                intent(in)              :: keys(:)
-    integer,                intent(in)              :: num_keys
+subroutine get_all_obs_contiguous(obs)
+    ! What happens if we attempt to retrieve all contiguous observations in obs_sequence?
+    ! rather than one get for each observation?
+    ! maybe would reduce startup cost?
     type(obs_type),         intent(inout)           :: obs(:)
     ! integer,                intent(inout)           :: obs
     type(obs_type_send),allocatable                 :: obs_buffer(:)
     type(obs_values_qc_type),allocatable            :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc, total_values
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
-    integer                                         :: ierror, i, d, get_cnt
+    integer                                         :: ierror, i, d, get_cnt, num_retrieve, val_retrieve
+    integer                                         :: scnd_num_retrieve
+    integer                                         :: scnd_val_retrieve
     real(r8)                                        :: stime, etime, ttime
     ! type(obs_type)                                  :: obs_arr(1)
 
     get_cnt = 0
-    total_values = odt%num_vals_per_obs * num_keys
-    allocate(obs_buffer(num_keys))
+    total_values = odt%num_vals_per_obs * odt%total_obs
+    allocate(obs_buffer(odt%total_obs))
     allocate(vals_buffer(total_values))
     ! todo: also determine whether the obs we are looking for is on another process
     ! if it is not, we do not need to perform a one-sided comm
 
     ! lock window of all processes
+    stime = mpi_wtime()
     call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%obs_win, ierror)
     call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win, ierror)
 
-    do i = 1, num_keys
-        d = (i-1) * odt%num_vals_per_obs
-        call get_obs_loc_info(keys(i), obs_pe, obs_offset, val_offset)
-        if (obs_pe == odt%my_pe) then
-            obs_buffer(i) = odt%obs_buf(obs_offset + 1)
-            vals_buffer(d+1:d+odt%num_vals_per_obs) = odt%val_buf(val_offset+1:val_offset+odt%num_vals_per_obs)
-        else
-            stime = MPI_WTime()
-            call mpi_get(obs_buffer(i), 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
-            etime = MPI_WTime()
-            ttime = ttime + (etime - stime)
 
-            stime = MPI_WTime()
-            call mpi_get(vals_buffer(d+1:d+odt%num_vals_per_obs), odt%num_vals_per_obs, odt%val_mpi, obs_pe, val_offset, odt%num_vals_per_obs, odt%val_mpi, odt%val_win, ierror)
-            etime = MPI_WTime()
-            ttime = ttime + (etime - stime)
+    num_retrieve = 0
+    val_retrieve = 0
 
-            get_cnt = get_cnt + 2
+    obs_offset = 0
+    val_offset = 0
+
+    print *, 'odt%num_obs_per_proc: ', odt%num_obs_per_proc
+    print *, 'odt%nprocs: ', odt%nprocs
+    scnd_num_retrieve = odt%num_obs_per_proc
+    obs_pos = 1
+    val_pos = 1
+    do i = 0, odt%nprocs - 1
+        ! print *, 'i: ', i
+        ! d = 3
+        scnd_num_retrieve = odt%num_obs_per_proc
+        scnd_val_retrieve = odt%num_obs_per_proc * odt%num_vals_per_obs
+        ! scnd_val_retrieve = 1
+
+        if (i < odt%rem) then
+            scnd_num_retrieve = scnd_num_retrieve + 1
+            scnd_val_retrieve = scnd_val_retrieve + odt%num_vals_per_obs
         endif
+
+        if (i == odt%my_pe) then
+            obs_buffer(obs_pos:obs_pos+scnd_num_retrieve-1) = odt%obs_buf(1:scnd_num_retrieve)
+            vals_buffer(val_pos:val_pos+scnd_val_retrieve-1) = odt%val_buf(1:scnd_val_retrieve)
+        else
+            call mpi_get(obs_buffer(obs_pos:obs_pos+scnd_num_retrieve-1), scnd_num_retrieve, odt%obs_mpi, i, obs_offset, scnd_num_retrieve, odt%obs_mpi, odt%obs_win, ierror)
+            ! call mpi_get(vals_buffer(val_pos:val_pos+scnd_val_retrieve-1), scnd_val_retrieve, odt%val_mpi, i, 0, scnd_val_retrieve, &
+            !     odt%val_mpi, odt%val_win, ierror)
+            call mpi_get(vals_buffer(val_pos:val_pos+scnd_val_retrieve-1), scnd_val_retrieve, odt%val_mpi, i, val_offset, &
+            scnd_val_retrieve, odt%val_mpi, odt%val_win, ierror)
+        endif
+
+        obs_pos = obs_pos + scnd_num_retrieve
+        val_pos = val_pos + scnd_val_retrieve
     enddo
 
     ! unlock window of all processes
     call mpi_win_unlock_all(odt%obs_win, ierror)
     call mpi_win_unlock_all(odt%val_win, ierror)
+    etime = mpi_wtime()
 
+    print *, 'finished get'
+    print *, 'time to get: ', etime - stime
+    print *, 'converting back'
     ! convert observation(s) back to packed form
-    call convert_obs_back(obs, obs_buffer, vals_buffer, num_keys, odt%num_vals_per_obs)
+    call convert_obs_back(obs, obs_buffer, vals_buffer, odt%total_obs, odt%num_vals_per_obs)
 
     ! print *, 'Average time to get: ', ttime / get_cnt
     deallocate(obs_buffer)
@@ -484,11 +508,13 @@ subroutine get_obs_set(keys, obs, num_keys)
     ! if it is not, we do not need to perform a one-sided comm
 
     ! lock all windows in shared mode; this should be fine since obs sequence is not modified by any process
+    stime = mpi_wtime()
     call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%obs_win, ierror)
     call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win, ierror)
 
     ! Loop through all of the keys we would like to retrieve
     do i = 1, num_keys
+        if (modulo(i, 1000000) == 0) print *, 'i: ', i
         d = (i-1) * odt%num_vals_per_obs
         call get_obs_loc_info(keys(i), obs_pe, obs_offset, val_offset)
         if (obs_pe == odt%my_pe) then
@@ -498,15 +524,15 @@ subroutine get_obs_set(keys, obs, num_keys)
 
             ! todo: maybe abstract timers away in separate type?
             ! also: provide option to enable/disable timers
-            stime = MPI_WTime()
+            ! stime = MPI_WTime()
             call mpi_get(obs_buffer(i), 1, odt%obs_mpi, obs_pe, obs_offset, 1, odt%obs_mpi, odt%obs_win, ierror)
-            etime = MPI_WTime()
-            ttime = ttime + (etime - stime)
+            ! etime = MPI_WTime()
+            ! ttime = ttime + (etime - stime)
 
-            stime = MPI_WTime()
+            ! stime = MPI_WTime()
             call mpi_get(vals_buffer(d+1:d+odt%num_vals_per_obs), odt%num_vals_per_obs, odt%val_mpi, obs_pe, val_offset, odt%num_vals_per_obs, odt%val_mpi, odt%val_win, ierror)
-            etime = MPI_WTime()
-            ttime = ttime + (etime - stime)
+            ! etime = MPI_WTime()
+            ! ttime = ttime + (etime - stime)
 
             get_cnt = get_cnt + 2
         endif
@@ -515,11 +541,13 @@ subroutine get_obs_set(keys, obs, num_keys)
     ! unlock all windows after retrieval has finished
     call mpi_win_unlock_all(odt%obs_win, ierror)
     call mpi_win_unlock_all(odt%val_win, ierror)
+    etime = mpi_wtime()
+    print *, 'time to get (get_obs_set): ', etime - stime
 
     ! convert observation(s) back to packed form
     call convert_obs_back(obs, obs_buffer, vals_buffer, num_keys, odt%num_vals_per_obs)
 
-    print *, 'Average time to get: ', ttime / get_cnt
+    ! print *, 'Average time to get: ', ttime / get_cnt
     ! obs = obs_arr(1)
     deallocate(obs_buffer)
     deallocate(vals_buffer)
@@ -1177,6 +1205,7 @@ subroutine convert_obs_back(recv, simple_obs, simple_val_qc, num_obs, num_values
     ! print *, 'start of loop 1'
     do i = 1, num_obs
 
+        ! print *, 'i: ', i
         ! set location
         call set_obs_def_location(recv(i)%def, set_location(simple_obs(i)%lon, simple_obs(i)%lat, simple_obs(i)%vloc, &
             simple_obs(i)%which_vert))
@@ -1204,6 +1233,7 @@ subroutine convert_obs_back(recv, simple_obs, simple_val_qc, num_obs, num_values
     d = 1
     diff = num_values - 1 
     do i = 1, num_obs
+        ! print *, 'i: ', i
         ! values
         ! values_qc(d:d+diff) = set(i)%values(1:num_values)
         do j = 1, num_values
