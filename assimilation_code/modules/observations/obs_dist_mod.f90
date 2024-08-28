@@ -397,6 +397,25 @@ subroutine get_obs_dist(key, obs)
 end subroutine get_obs_dist
 !------------------------------------------------------------------
 !------------------------------------------------------------------
+subroutine samplesort_obs(obs_set)
+    type(obs_type),     intent(in)      :: obs_set(:) ! our original observation sequence
+
+    ! 1. select set of samples from every process's observation sequences
+    ! 2. every process sends its sample set to first process
+    ! 3. first process sorts samples using qsort
+    ! 4. first process selects p - 1 samples from this set
+    ! 5. p - 1 samples broadcasted to every process
+    ! 6. elements are placed into their respective buckets
+    ! 7. count and displacement sent using alltoall
+    ! 8. actual elements sent using alltoallv
+
+    ! Idea: use samplesort to sort observations into time time order
+    ! will provide a faster, more memory efficient sort (ideally)
+    ! worst case: everything breaks (yay! fun!)
+
+end subroutine samplesort_obs
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine get_all_obs_contiguous(obs)
     ! What happens if we attempt to retrieve all contiguous observations in obs_sequence?
     ! rather than one get for each observation?
