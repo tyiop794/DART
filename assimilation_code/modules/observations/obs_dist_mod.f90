@@ -80,8 +80,12 @@ module obs_dist_mod
     type obs_dist_type
         ! use these for our unpacked observations and values
         ! will be accessed whenever a process attempts a one-sided get
-        type(obs_values_qc_type), allocatable   :: val_buf(:)
-        type(obs_type_send), allocatable        :: obs_buf(:)
+        !
+        ! Why pointers (instead of 'allocate')? I would like to switch where these are pointing 
+        ! after the observations have been sorted, and would like to avoid 
+        ! an accidental deallocation happening under my feet
+        type(obs_values_qc_type), pointer   :: val_buf(:) => NULL()
+        type(obs_type_send), pointer        :: obs_buf(:) => NULL()
         ! real(r8), pointer                       :: obs_reals(:) => NULL()
         integer                                 :: obs_mpi
         integer                                 :: val_mpi
@@ -417,6 +421,8 @@ subroutine samplesort_obs(obs_set, perc)
     real                                :: start_random
     integer                             :: rand_idx
     integer                             :: our_num_obs
+    integer                             :: new_obs_num
+    integer                             :: new_vals_num
     integer, allocatable                :: bucket_cnt(:)
     integer, allocatable                :: bucket_disp(:)
     integer, allocatable                :: val_qc_cnt(:)
@@ -501,6 +507,8 @@ subroutine samplesort_obs(obs_set, perc)
     call mpi_bcast(scnd_selection, odt%nprocs - 1, MPI_INTEGER8, 0, MPI_COMM_WORLD, odt%ierror)
 
     ! Now we have buckets in which to sort elements
+    ! NOTE: maybe also use these buckets as indicators as to which processes are likely to have which elements
+    ! storing / duplicating such information should take a minimal amount of memory (8 bytes (time) * nprocs)
     ! Use binary search to select bucket for each element (O(nlogn))
     ! Actually...maybe not; elements are already sorted
 
@@ -542,11 +550,31 @@ subroutine samplesort_obs(obs_set, perc)
     val_qc_disp(1:odt%nprocs) = val_qc_disp(1:odt%nprocs) * odt%num_vals_per_obs
 
 
+    ! determine the num of observations we will receive
+    new_obs_num = 0
+    do i = 1, odt%nprocs
+        new_obs_num = new_obs_num + bucket_cnt(i)
+    enddo
+
+    new_vals_num = new_obs_num * odt%num_vals_per_obs
+
+    ! alltoallv both the observations and the values
     call mpi_alltoallv(odt%obs_buf, bucket_cnt, bucket_disp, odt%obs_mpi, new_obs_set, bucket_cnt, bucket_disp, odt%obs_mpi, &
         MPI_COMM_WORLD, odt%ierror)
 
+
     call mpi_alltoallv(odt%val_buf, val_qc_cnt, val_qc_disp, odt%val_mpi, new_val_qc, val_qc_cnt, val_qc_disp, odt%val_mpi, &
         MPI_COMM_WORLD, odt%ierror)
+
+    ! Final sort of the observations on each process
+    call qsort(c_loc(new_obs_set(1)), int(new_obs_num, c_size_t), sizeof(new_obs_set(1)), c_funloc(compare_obs))
+    call qsort(c_loc(new_val_qc(1)), int(new_vals_num, c_size_t), sizeof(new_obs_set(1)), c_funloc(compare_vals))
+
+    ! set our global pointers to the new sets and deallocate the old sets
+    deallocate(odt%obs_buf)
+    deallocate(odt%val_buf)
+    odt%obs_buf => new_obs_set
+    odt%val_buf > new_val_qc
 
     ! 1. select set of samples from every process's observation sequences
     !    (1% of the total observation sequence)
