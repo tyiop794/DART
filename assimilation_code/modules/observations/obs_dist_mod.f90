@@ -413,14 +413,20 @@ subroutine samplesort_obs(obs_set, perc)
     integer                             :: all_sample_num
     integer                             :: our_sample_num
     integer                             :: sample_cnt
-    integer                             :: j, i, per_proc
+    integer                             :: j, i, per_proc, k
     real                                :: start_random
     integer                             :: rand_idx
     integer                             :: our_num_obs
+    integer, allocatable                :: bucket_cnt(:)
+    integer, allocatable                :: bucket_disp(:)
+    integer, allocatable                :: val_qc_cnt(:)
+    integer, allocatable                :: val_qc_disp(:)
     integer(i8), allocatable            :: all_samples(:)
     integer(i8), allocatable            :: our_samples(:)
     integer(i8), allocatable            :: is_selected(:)
     integer(i8), allocatable            :: scnd_selection(:)
+    type(obs_type_send), pointer        :: new_obs_set(:) => NULL()
+    type(obs_values_qc_type), pointer   :: new_val_qc(:) => NULL()
     integer(i8)                         :: curr_time
 
     our_num_obs = odt%num_obs_per_proc
@@ -480,8 +486,9 @@ subroutine samplesort_obs(obs_set, perc)
     odt%ierror)
 
     ! if first process sort time samples using qsort and select p - 1 samples from this set
+    ! allocate for all processes to store bucket vars
+    allocate(scnd_selection(odt%nprocs - 1))
     if (odt%my_pe == 0) then
-        allocate(scnd_selection(odt%nprocs - 1))
         per_proc = all_sample_num / odt%nprocs
         ! todo: sort elements in sample set using qsort
         qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
@@ -491,8 +498,55 @@ subroutine samplesort_obs(obs_set, perc)
         print *, 'next steps...'
     endif
 
-    call mpi_bcast()
+    call mpi_bcast(scnd_selection, odt%nprocs - 1, MPI_INTEGER8, 0, MPI_COMM_WORLD, odt%ierror)
 
+    ! Now we have buckets in which to sort elements
+    ! Use binary search to select bucket for each element (O(nlogn))
+    ! Actually...maybe not; elements are already sorted
+
+    ! Currently assume we have no duplicate keys
+    ! TODO: We'll handle that case later
+    allocate(bucket_disp(odt%nprocs))
+    allocate(bucket_cnt(odt%nprocs))
+    k = our_samples(1)
+    bucket_disp(1) = 0
+    do i = 1, odt%nprocs
+        j = 0
+        do while (k < scnd_selection(i))
+            j = j + 1
+            k = our_samples(j)
+        enddo
+        bucket_cnt(i) = j
+        bucket_disp(i + 1) = j + bucket_disp(i)
+        print *, 'do something else lol'
+    enddo
+
+    ! alltoall on the displacement and count vars
+    call mpi_alltoall(MPI_IN_PLACE, odt%nprocs, MPI_INTEGER8, bucket_disp, odt%nprocs, MPI_INTEGER8, MPI_COMM_WORLD, &
+        odt%ierror)
+
+    call mpi_alltoall(MPI_IN_PLACE, odt%nprocs, MPI_INTEGER8, bucket_disp, odt%nprocs, MPI_INTEGER8, MPI_COMM_WORLD, &
+        odt%ierror)
+
+    ! alltoallv on the elements themselves
+    ! (probably the most expensive component of this algorithm)
+    ! note: need to modify count and disp for values/qc since each
+    ! observation may have more than one
+
+    allocate(val_qc_cnt(odt%nprocs))
+    allocate(val_qc_disp(odt%nprocs))
+    val_qc_cnt(1:odt%nprocs) = bucket_cnt(1:odt%nprocs)
+    val_qc_disp(1:odt%nprocs) = bucket_disp(1:odt%nprocs)
+
+    val_qc_cnt(1:odt%nprocs) = val_qc_cnt(1:odt%nprocs) * odt%num_vals_per_obs
+    val_qc_disp(1:odt%nprocs) = val_qc_disp(1:odt%nprocs) * odt%num_vals_per_obs
+
+
+    call mpi_alltoallv(odt%obs_buf, bucket_cnt, bucket_disp, odt%obs_mpi, new_obs_set, bucket_cnt, bucket_disp, odt%obs_mpi, &
+        MPI_COMM_WORLD, odt%ierror)
+
+    call mpi_alltoallv(odt%val_buf, val_qc_cnt, val_qc_disp, odt%val_mpi, new_val_qc, val_qc_cnt, val_qc_disp, odt%val_mpi, &
+        MPI_COMM_WORLD, odt%ierror)
 
     ! 1. select set of samples from every process's observation sequences
     !    (1% of the total observation sequence)
