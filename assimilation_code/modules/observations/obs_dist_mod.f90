@@ -1,6 +1,7 @@
 module obs_dist_mod
     use mpi
     use iso_c_binding
+    use ifport
     use     mpi_utilities_mod, only : task_count, my_task_id, send_to, receive_from
     use        types_mod, only : r8, i8, MISSING_R8, metadatalength
 
@@ -96,9 +97,16 @@ module obs_dist_mod
         integer                                 :: mpi_time
         integer                                 :: ngets
         integer                                 :: dist_type
+        integer                                 :: ierror
     end type obs_dist_type
     type(obs_dist_type) :: odt
     ! integer :: obs_win, val_win
+
+    type obs_sample_type
+        private
+        integer                                 :: key
+        integer                                 :: selected
+    end type obs_sample_time
 
     interface
         subroutine qsort(array, elem_count, elem_size, compare) bind(C, name="qsort")
@@ -277,6 +285,7 @@ end function get_obs_offset
 !------------------------------------------------------------------
 subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc, dist_type, nprocs)
     ! this will initialize the obs window for one-sided communication
+    ! or distributed communication generally
     type(obs_type),          intent(inout)      :: buffer(:)
     integer,                 intent(in)         :: num_obs_per_proc
     integer,                 intent(in)         :: total_obs
@@ -397,10 +406,96 @@ subroutine get_obs_dist(key, obs)
 end subroutine get_obs_dist
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine samplesort_obs(obs_set)
+subroutine samplesort_obs(obs_set, perc)
     type(obs_type),     intent(in)      :: obs_set(:) ! our original observation sequence
+    integer,            intent(in)      :: perc ! what percentage of obs sequence will be our sample?
+
+    integer                             :: all_sample_num
+    integer                             :: our_sample_num
+    integer                             :: sample_cnt
+    integer                             :: j, i, per_proc
+    real                                :: start_random
+    integer                             :: rand_idx
+    integer                             :: our_num_obs
+    integer(i8), allocatable            :: all_samples(:)
+    integer(i8), allocatable            :: our_samples(:)
+    integer(i8), allocatable            :: is_selected(:)
+    integer(i8), allocatable            :: scnd_selection(:)
+    integer(i8)                         :: curr_time
+
+    our_num_obs = odt%num_obs_per_proc
+    if (odt%my_pe < odt%rem) then
+        our_num_obs = our_num_obs + 1
+    endif
+
+    ! number of samples to retrieve / send to first process
+    ! note: if no parameter is specified, assume 1%
+    all_sample_num = (perc * 0.01) * odt%total_obs
+
+    ! allocate memory for all samples (only first process)
+    if (odt%my_pe == 0) then
+        allocate(all_samples(all_sample_num))
+    endif
+
+    ! calculate our number of samples and allocate an array 
+    ! also: get a random number (somehow)
+    our_sample_num = all_sample_num / odt%nprocs
+    allocate(our_samples(our_sample_num))
+    allocate(is_selected(our_num_obs))
+    is_selected(1:our_num_obs) = 0
+
+    do while (sample_cnt < our_sample_num)
+        call random_number(start_random) ! random enough? assume yes for now (until everything explodes)
+        rand_idx = floor(start_random * our_num_obs) + 1
+        if (is_selected(rand_idx) == 0) then
+            is_selected(sample_cnt + 1) = 1
+            sample_cnt = sample_cnt + 1
+        else
+            cycle
+        endif
+    enddo
+
+    ! todo: also need to sort our obs seq before sending to first process
+    
+    ! sort observations in time order
+    ! this doesn't work in parallel; for now assume that it does
+    ! TODO: this **must** be fixed before testing or the world **will** end
+    call sort_obs_send_by_time(odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, our_num_obs)
+
+    j = 1
+    do i = 1, our_num_obs
+        if (is_selected(i) == 1) then
+            curr_time = (odt%obs_buf(i)%days*24*60*60) + odt%obs_buf(i)%seconds
+            our_samples(j) = curr_time
+            j = j + 1
+            ! our_samples(j) = odt%obs_buf%
+        endif
+    enddo
+
+    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
+    ! perform gather to retrieve samples 
+
+    call mpi_gather(our_samples, our_sample_num, MPI_INTEGER8, all_samples, all_sample_num, MPI_INTEGER8, 0, MPI_COMM_WORLD, &
+    odt%ierror)
+
+    ! if first process sort time samples using qsort and select p - 1 samples from this set
+    if (odt%my_pe == 0) then
+        allocate(scnd_selection(odt%nprocs - 1))
+        per_proc = all_sample_num / odt%nprocs
+        ! todo: sort elements in sample set using qsort
+        qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
+        do i = 1, odt%nprocs - 1
+            scnd_selection(i) = all_samples(i * per_proc)
+        enddo
+        print *, 'next steps...'
+    endif
+
+    call mpi_bcast()
+
 
     ! 1. select set of samples from every process's observation sequences
+    !    (1% of the total observation sequence)
     ! 2. every process sends its sample set to first process
     ! 3. first process sorts samples using qsort
     ! 4. first process selects p - 1 samples from this set
@@ -409,8 +504,8 @@ subroutine samplesort_obs(obs_set)
     ! 7. count and displacement sent using alltoall
     ! 8. actual elements sent using alltoallv
 
-    ! Idea: use samplesort to sort observations into time time order
-    ! will provide a faster, more memory efficient sort (ideally)
+    ! Idea: use samplesort to sort observations into time order
+    ! best case: will provide a faster, more memory efficient sort
     ! worst case: everything breaks (yay! fun!)
 
 end subroutine samplesort_obs
@@ -699,6 +794,21 @@ function compare_vals(val1, val2) Bind(C)
         compare_vals = 1
     else
         compare_vals = 0
+    endif
+
+end function compare_vals
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+function compare_large_int(val1, val2) Bind(C)
+    integer(i8),                    intent(in)      :: val1, val2 
+    integer(c_int)                                  :: compare_large_int
+
+    if (val1 < val2) then
+        compare_large_int = -1
+    else if (val1 > val2) then
+        compare_large_int = 1
+    else
+        compare_large_int = 0
     endif
 
 end function compare_vals
