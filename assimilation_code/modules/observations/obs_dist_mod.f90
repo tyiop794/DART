@@ -1,7 +1,7 @@
 module obs_dist_mod
     use mpi
     use iso_c_binding
-    use ifport
+    ! use ifport, only : random_number
     use     mpi_utilities_mod, only : task_count, my_task_id, send_to, receive_from
     use        types_mod, only : r8, i8, MISSING_R8, metadatalength
 
@@ -26,6 +26,7 @@ module obs_dist_mod
     ! The key is needed to indicate the element number in the storage for the obs_sequence
     ! Do I want to enforce the identity of the particular obs_sequence?
        integer :: key
+       integer(i8) :: time_actual
        type(obs_def_type) :: def
        real(r8), allocatable :: values(:)
        real(r8), allocatable :: qc(:)
@@ -38,6 +39,7 @@ module obs_dist_mod
 
     type obs_values_qc_type
        integer :: time_order
+       integer(i8) :: time_actual
        real(r8) :: val
        real(r8) :: qc
     end type obs_values_qc_type
@@ -71,6 +73,7 @@ module obs_dist_mod
        integer :: prev_time, next_time
        integer :: cov_group
        integer :: time_order
+       integer(i8) :: time_actual
        real(r8) :: lon
        real(r8) :: lat
        real(r8) :: vloc
@@ -90,6 +93,7 @@ module obs_dist_mod
         integer                                 :: obs_mpi
         integer                                 :: val_mpi
         integer                                 :: num_obs_per_proc
+        integer                                 :: our_num_obs
         integer                                 :: num_vals_per_obs
         integer                                 :: num_vals_per_proc
         integer                                 :: total_obs
@@ -110,7 +114,7 @@ module obs_dist_mod
         private
         integer                                 :: key
         integer                                 :: selected
-    end type obs_sample_time
+    end type obs_sample_type
 
     interface
         subroutine qsort(array, elem_count, elem_size, compare) bind(C, name="qsort")
@@ -319,6 +323,12 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     odt%mpi_time = 0.0
     odt%dist_type = dist_type
 
+    ! set the number of obs associated with our process specifically
+    odt%our_num_obs = odt%num_obs_per_proc
+    if (odt%my_pe < odt%rem) then
+        odt%our_num_obs = odt%our_num_obs + 1
+    endif
+
     ! setup our datatypes
     call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
 
@@ -410,14 +420,13 @@ subroutine get_obs_dist(key, obs)
 end subroutine get_obs_dist
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine samplesort_obs(obs_set, perc)
-    type(obs_type),     intent(in)      :: obs_set(:) ! our original observation sequence
+subroutine samplesort_obs(perc)
     integer,            intent(in)      :: perc ! what percentage of obs sequence will be our sample?
 
     integer                             :: all_sample_num
     integer                             :: our_sample_num
     integer                             :: sample_cnt
-    integer                             :: j, i, per_proc, k
+    integer                             :: j, i, per_proc, k, l
     real                                :: start_random
     integer                             :: rand_idx
     integer                             :: our_num_obs
@@ -427,24 +436,32 @@ subroutine samplesort_obs(obs_set, perc)
     integer, allocatable                :: bucket_disp(:)
     integer, allocatable                :: val_qc_cnt(:)
     integer, allocatable                :: val_qc_disp(:)
-    integer(i8), allocatable            :: all_samples(:)
+    integer(i8), allocatable,target     :: all_samples(:)
     integer(i8), allocatable            :: our_samples(:)
-    integer(i8), allocatable            :: is_selected(:)
+    integer, allocatable                :: is_selected(:)
     integer(i8), allocatable            :: scnd_selection(:)
     type(obs_type_send), pointer        :: new_obs_set(:) => NULL()
     type(obs_values_qc_type), pointer   :: new_val_qc(:) => NULL()
+    type(obs_type), allocatable, target :: obs_set_sort(:)
     integer(i8)                         :: curr_time
+    integer                             :: iden_vals, iden_rem
 
     our_num_obs = odt%num_obs_per_proc
     if (odt%my_pe < odt%rem) then
         our_num_obs = our_num_obs + 1
     endif
 
+    ! Convert back to packed to make sorting obs easier
+    print *, 'Converting observations to packed set'
+    allocate(obs_set_sort(our_num_obs))
+    call convert_obs_back(obs_set_sort, odt%obs_buf, odt%val_buf, our_num_obs, odt%num_vals_per_obs)
+
     ! number of samples to retrieve / send to first process
     ! note: if no parameter is specified, assume 1%
     all_sample_num = (perc * 0.01) * odt%total_obs
 
     ! allocate memory for all samples (only first process)
+    print *, 'allocating memory for samples'
     if (odt%my_pe == 0) then
         allocate(all_samples(all_sample_num))
     endif
@@ -456,6 +473,8 @@ subroutine samplesort_obs(obs_set, perc)
     allocate(is_selected(our_num_obs))
     is_selected(1:our_num_obs) = 0
 
+    print *, 'randomly selecting obs'
+    sample_cnt = 0
     do while (sample_cnt < our_sample_num)
         call random_number(start_random) ! random enough? assume yes for now (until everything explodes)
         rand_idx = floor(start_random * our_num_obs) + 1
@@ -472,12 +491,18 @@ subroutine samplesort_obs(obs_set, perc)
     ! sort observations in time order
     ! this doesn't work in parallel; for now assume that it does
     ! TODO: this **must** be fixed before testing or the world **will** end
-    call sort_obs_send_by_time(odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, our_num_obs)
 
+    ! would this even work?! this is so cursed...
+    print *, 'sorting observations in time order'
+    call qsort(c_loc(obs_set_sort(1)), int(odt%our_num_obs, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
+    ! call sort_obs_send_by_time(odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, our_num_obs)
+
+    ! force a leave; we need to test everything happening earlier first!
+    return
     j = 1
     do i = 1, our_num_obs
         if (is_selected(i) == 1) then
-            curr_time = (odt%obs_buf(i)%days*24*60*60) + odt%obs_buf(i)%seconds
+            curr_time = obs_set_sort(i)%time_actual
             our_samples(j) = curr_time
             j = j + 1
             ! our_samples(j) = odt%obs_buf%
@@ -496,8 +521,7 @@ subroutine samplesort_obs(obs_set, perc)
     allocate(scnd_selection(odt%nprocs - 1))
     if (odt%my_pe == 0) then
         per_proc = all_sample_num / odt%nprocs
-        ! todo: sort elements in sample set using qsort
-        qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
+        call qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
         do i = 1, odt%nprocs - 1
             scnd_selection(i) = all_samples(i * per_proc)
         enddo
@@ -520,13 +544,47 @@ subroutine samplesort_obs(obs_set, perc)
     bucket_disp(1) = 0
     do i = 1, odt%nprocs
         j = 0
-        do while (k < scnd_selection(i))
-            j = j + 1
-            k = our_samples(j)
-        enddo
+        if (i < odt%nprocs) then
+            do while (k < scnd_selection(i))
+                j = j + 1
+                k = our_samples(j)
+            enddo
+        else
+            ! print *, 'alt case where we are at last process'
+            j = odt%total_obs - bucket_disp(odt%nprocs) 
+        endif
         bucket_cnt(i) = j
-        bucket_disp(i + 1) = j + bucket_disp(i)
+        if (i /= odt%nprocs) bucket_disp(i + 1) = j + bucket_disp(i)
         print *, 'do something else lol'
+    enddo
+
+    ! check for identical sets of keys
+    ! If a bucket has no elements, that likely means the previous key engulfed all elements
+    ! split the elements placed into that bucket across all buckets that have the same key 
+    i = 1
+    do while (i <= odt%nprocs)
+    !do i = 1, odt%nprocs
+        if (bucket_cnt(i) == 0) then
+            print *, 'haaah'
+            j = i
+            k = 0
+            do while (j + k < odt%nprocs .and. bucket_cnt(j + k) == 0)
+                k = k + 1
+            enddo
+            k = k + 1
+            iden_vals = bucket_cnt(i - 1) / k
+            iden_rem = modulo(bucket_cnt(i - 1), k)
+            l = 0
+            do while (l < k)
+                bucket_cnt((i-1) + l) = iden_vals
+                if (l < iden_rem) then
+                    bucket_cnt((i-1) + l) = bucket_cnt((i - 1) + l) + 1
+                endif
+            enddo
+            i = j + k - 1
+        else
+            i = i + 1
+        endif
     enddo
 
     ! alltoall on the displacement and count vars
@@ -538,16 +596,21 @@ subroutine samplesort_obs(obs_set, perc)
 
     ! alltoallv on the elements themselves
     ! (probably the most expensive component of this algorithm)
+
     ! note: need to modify count and disp for values/qc since each
     ! observation may have more than one
-
     allocate(val_qc_cnt(odt%nprocs))
     allocate(val_qc_disp(odt%nprocs))
     val_qc_cnt(1:odt%nprocs) = bucket_cnt(1:odt%nprocs)
     val_qc_disp(1:odt%nprocs) = bucket_disp(1:odt%nprocs)
 
     val_qc_cnt(1:odt%nprocs) = val_qc_cnt(1:odt%nprocs) * odt%num_vals_per_obs
-    val_qc_disp(1:odt%nprocs) = val_qc_disp(1:odt%nprocs) * odt%num_vals_per_obs
+
+    ! determine displacement for bucket values
+    val_qc_disp(1) = 0 
+    do i = 2, odt%nprocs
+        val_qc_disp(i) = val_qc_disp(i - 1) + val_qc_cnt(i) 
+    enddo
 
 
     ! determine the num of observations we will receive
@@ -574,7 +637,7 @@ subroutine samplesort_obs(obs_set, perc)
     deallocate(odt%obs_buf)
     deallocate(odt%val_buf)
     odt%obs_buf => new_obs_set
-    odt%val_buf > new_val_qc
+    odt%val_buf => new_val_qc
 
     ! 1. select set of samples from every process's observation sequences
     !    (1% of the total observation sequence)
@@ -778,12 +841,12 @@ end subroutine destroy_obs_mpi
 subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     integer,                    intent(inout)    :: mpi_obstype
     integer,                    intent(inout)    :: mpi_valstype
-    integer :: rank, nprocs, ierror, i, num_ints, num_vars, num_doubles, num_logicals
+    integer :: rank, nprocs, ierror, i, num_ints, num_vars, num_doubles, num_logicals, num_longs
     integer :: num_vars_vals, num_ints_vals, num_doubles_vals
-    integer(MPI_ADDRESS_KIND) :: offsets(14), offsets_vals(3)
-    integer(MPI_ADDRESS_KIND) :: address(14), address_vals(3)
-    integer :: oldtypes(14), oldtypes_vals(3)
-    integer :: bl_var(14), bl_var_vals(3)
+    integer(MPI_ADDRESS_KIND) :: offsets(15), offsets_vals(4)
+    integer(MPI_ADDRESS_KIND) :: address(15), address_vals(4)
+    integer :: oldtypes(15), oldtypes_vals(4)
+    integer :: bl_var(15), bl_var_vals(4)
     type(obs_type_send) :: initial
     type(obs_values_qc_type) :: init_val
 
@@ -791,14 +854,16 @@ subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     num_ints = 10 
     num_doubles = 4
     num_logicals = 0
-    num_vars = 14
-    bl_var(1:14) = 1 
+    num_longs = 1
+    num_vars = 15
+    bl_var(1:num_vars) = 1 
 
     ! for  obs_values_qc_type
     num_ints_vals = 1
     num_doubles_vals = 2
-    num_vars_vals = 3
-    bl_var_vals(1:3) = 1
+    num_longs_vals = 1
+    num_vars_vals = 4
+    bl_var_vals(1:num_vars_vals) = 1
 
     ! get the addresses of every variable; will let us calculate the displacement
     call mpi_get_address(initial, address(1), ierror)
@@ -811,23 +876,27 @@ subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     call mpi_get_address(initial%next_time, address(8), ierror)
     call mpi_get_address(initial%cov_group, address(9), ierror)
     call mpi_get_address(initial%time_order, address(10), ierror)
-    call mpi_get_address(initial%lon, address(11), ierror)
-    call mpi_get_address(initial%lat, address(12), ierror)
-    call mpi_get_address(initial%vloc, address(13), ierror)
-    call mpi_get_address(initial%error_variance, address(14), ierror)
+    call mpi_get_address(initial%time_actual, address(11), ierror)
+    call mpi_get_address(initial%lon, address(12), ierror)
+    call mpi_get_address(initial%lat, address(13), ierror)
+    call mpi_get_address(initial%vloc, address(14), ierror)
+    call mpi_get_address(initial%error_variance, address(15), ierror)
 
     ! also do this for values_qc derived type
     call mpi_get_address(init_val, address_vals(1), ierror)
-    call mpi_get_address(init_val%val, address_vals(2), ierror)
-    call mpi_get_address(init_val%qc, address_vals(3), ierror)
+    call mpi_get_address(init_val%time_actual, address_vals(2), ierror)
+    call mpi_get_address(init_val%val, address_vals(3), ierror)
+    call mpi_get_address(init_val%qc, address_vals(4), ierror)
 
     ! define types in struct in terms of base MPI datatypes
     oldtypes(1:num_ints) = MPI_INTEGER
-    oldtypes(num_ints+1:num_ints+num_doubles) = MPI_REAL8
+    oldtypes(11) = MPI_INTEGER8
+    oldtypes(num_ints+num_longs+1:num_ints+num_longs+num_doubles) = MPI_REAL8
 
     ! same with values_qc
     oldtypes_vals(1:num_ints_vals) = MPI_INTEGER
-    oldtypes_vals(num_ints_vals+1:num_ints_vals+num_doubles_vals) = MPI_REAL8
+    oldtypes_vals(2) = MPI_INTEGER8
+    oldtypes_vals(num_ints_vals+num_longs+1:num_ints_vals+num_longs+num_doubles_vals) = MPI_REAL8
 
     ! set the offsets of each of the variables from the first
     offsets(1) = 0
@@ -881,6 +950,36 @@ function compare_vals(val1, val2) Bind(C)
 end function compare_vals
 !------------------------------------------------------------------
 !------------------------------------------------------------------
+function compare_time_types(val1, val2) Bind(C)
+    type(obs_values_qc_type),       intent(in)      :: val1, val2 
+    integer(c_int)                                  :: compare_time_types
+
+    if (val1%time_actual < val2%time_actual) then
+        compare_time_types = -1
+    else if (val1%time_actual > val2%time_actual) then
+        compare_time_types = 1
+    else
+        compare_time_types = 0
+    endif
+
+end function compare_time_types
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+function compare_time_types_alt(val1, val2) Bind(C)
+    type(obs_type),       intent(in)      :: val1, val2 
+    integer(c_int)                                  :: compare_time_types_alt
+
+    if (val1%time_actual < val2%time_actual) then
+        compare_time_types_alt = -1
+    else if (val1%time_actual > val2%time_actual) then
+        compare_time_types_alt = 1
+    else
+        compare_time_types_alt = 0
+    endif
+
+end function compare_time_types_alt
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 function compare_large_int(val1, val2) Bind(C)
     integer(i8),                    intent(in)      :: val1, val2 
     integer(c_int)                                  :: compare_large_int
@@ -893,7 +992,7 @@ function compare_large_int(val1, val2) Bind(C)
         compare_large_int = 0
     endif
 
-end function compare_vals
+end function compare_large_int
 !------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
@@ -948,6 +1047,59 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
 
 
 end subroutine sort_obs_send_by_time
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+subroutine sort_obs_by_time_alt(obs_set, values_qc, num_values, num_obs)
+    ! todo: make this sort in-place; too much memory used currently
+    ! need to allocate two massive arrays
+    type(obs_type_send), target,        intent(inout)       :: obs_set(num_obs)
+    type(obs_values_qc_type), target,   intent(inout)       :: values_qc(num_obs * num_values)
+    integer,                            intent(in)          :: num_values, num_obs
+    integer                                                 :: i, next_time, j, k, val_idx, x, total_values, l
+    integer(C_SIZE_T)                                       :: num_obs_c, total_vals_c, sizeof_val, sizeof_obs
+    ! integer                                                 :: test(4), test_2(4), 
+
+    print *, 'odt%total_obs: ', odt%total_obs
+    print *, 'odt%rem: ', odt%rem
+    i = 1
+    j = 1
+    k = 1
+    do while (i /= -1)
+        ! if (modulo(i, 10000) == 0) print *, 'i = ', i
+        l = get_obs_offset(i)
+
+        obs_set(l)%time_order = j 
+        ! obs_set(i)%time_order = num_obs - j
+
+        ! need to deal with values_qc as well
+        val_idx = ((l - 1) * num_values) + 1
+        do x = val_idx, (val_idx + num_values) - 1
+            values_qc(x)%time_order = k
+            ! values_qc(x)%time_order = (num_obs * num_values) - k 
+            k = k + 1
+        enddo 
+
+        ! move indices
+        i = obs_set(l)%next_time
+        ! print *, 'i = ', i
+        ! if (i == 16777217) print *, 'i (l = 16777217): ', i
+        j = j + 1
+    enddo
+    ! print *, 'Made it to qsort!'
+
+    total_values = num_obs * num_values
+    total_vals_c = total_values
+    num_obs_c = num_obs
+    sizeof_val = sizeof(values_qc(1))
+    sizeof_obs = sizeof(obs_set(1))
+
+    print *, 'sort 1'
+    call qsort(c_loc(obs_set(1)), int(num_obs, c_size_t), sizeof_obs, c_funloc(compare_obs))
+    print *, 'sort 2'
+    call qsort(c_loc(values_qc(1)), int(num_obs, c_size_t), sizeof_val, c_funloc(compare_vals))
+    
+
+end subroutine sort_obs_by_time_alt
 !------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine send_obs_set(set, proc, num_obs, num_values)
@@ -1345,6 +1497,7 @@ subroutine convert_obs_set(orig, out_obs, out_vals, num_values, num_obs)
         call get_time(obs_time, seconds, days)
         out_obs(i)%seconds = seconds
         out_obs(i)%days = days
+        out_obs(i)%time_actual = (out_obs(i)%days * 24 * 60 * 60) + out_obs(i)%seconds
 
         ! get other values
         out_obs(i)%kind = get_obs_def_type_of_obs(obs_def)
@@ -1365,6 +1518,7 @@ subroutine convert_obs_set(orig, out_obs, out_vals, num_values, num_obs)
         do j = 1, num_values
             out_vals(j+d-1)%val = orig(i)%values(j)
             out_vals(j+d-1)%qc = orig(i)%qc(j)
+            out_vals(j+d-1)%time_actual = out_obs(i)%time_actual
         enddo
         ! values_qc(d:d+diff)%qc = set(i)%qc(1:num_values)
 
@@ -1423,6 +1577,7 @@ subroutine convert_obs_back(recv, simple_obs, simple_val_qc, num_obs, num_values
 
         ! get time
         call set_obs_def_time(recv(i)%def, set_time(simple_obs(i)%seconds, simple_obs(i)%days))
+        recv(i)%time_actual = (simple_obs(i)%days*24*60*60)+simple_obs(i)%seconds
 
         ! get other values
         if (i == 1) then

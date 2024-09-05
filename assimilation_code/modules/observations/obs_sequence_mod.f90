@@ -1489,6 +1489,9 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 ! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
+call samplesort_obs(1)
+return
+
 if (dist_type == 0) then
     call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
 else
