@@ -420,6 +420,12 @@ subroutine get_obs_dist(key, obs)
 end subroutine get_obs_dist
 !------------------------------------------------------------------
 !------------------------------------------------------------------
+subroutine dbg_print(str)
+    character(len=*),   intent(in)      :: str
+    if (odt%my_pe == 0) print *, str
+end subroutine dbg_print
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine samplesort_obs(perc)
     integer,            intent(in)      :: perc ! what percentage of obs sequence will be our sample?
 
@@ -434,6 +440,8 @@ subroutine samplesort_obs(perc)
     integer                             :: new_vals_num
     integer, allocatable                :: bucket_cnt(:)
     integer, allocatable                :: bucket_disp(:)
+    integer, allocatable                :: new_cnt(:)
+    integer, allocatable                :: new_disp(:)
     integer, allocatable                :: val_qc_cnt(:)
     integer, allocatable                :: val_qc_disp(:)
     integer(i8), allocatable,target     :: all_samples(:)
@@ -452,8 +460,8 @@ subroutine samplesort_obs(perc)
     endif
 
     ! Convert back to packed to make sorting obs easier
-    print *, 'Converting observations to packed set'
-    allocate(obs_set_sort(our_num_obs))
+    if (odt%my_pe == 0) print *, 'Converting observations to packed set'
+    call allocate_obs_set(obs_set_sort, our_num_obs, odt%num_vals_per_obs)
     call convert_obs_back(obs_set_sort, odt%obs_buf, odt%val_buf, our_num_obs, odt%num_vals_per_obs)
 
     ! number of samples to retrieve / send to first process
@@ -461,10 +469,6 @@ subroutine samplesort_obs(perc)
     all_sample_num = (perc * 0.01) * odt%total_obs
 
     ! allocate memory for all samples (only first process)
-    print *, 'allocating memory for samples'
-    if (odt%my_pe == 0) then
-        allocate(all_samples(all_sample_num))
-    endif
 
     ! calculate our number of samples and allocate an array 
     ! also: get a random number (somehow)
@@ -473,13 +477,23 @@ subroutine samplesort_obs(perc)
     allocate(is_selected(our_num_obs))
     is_selected(1:our_num_obs) = 0
 
-    print *, 'randomly selecting obs'
+    if (odt%my_pe == 0) print *, 'allocating memory for samples'
+
+    all_sample_num = our_sample_num * odt%nprocs
+    if (odt%my_pe == 0) then
+        allocate(all_samples(all_sample_num))
+    else
+        allocate(all_samples(1))
+    endif
+
+    if (odt%my_pe == 0) print *, 'randomly selecting obs'
     sample_cnt = 0
     do while (sample_cnt < our_sample_num)
         call random_number(start_random) ! random enough? assume yes for now (until everything explodes)
         rand_idx = floor(start_random * our_num_obs) + 1
+        ! if (odt%my_pe == 0) print *, rand_idx
         if (is_selected(rand_idx) == 0) then
-            is_selected(sample_cnt + 1) = 1
+            is_selected(rand_idx) = 1
             sample_cnt = sample_cnt + 1
         else
             cycle
@@ -493,12 +507,24 @@ subroutine samplesort_obs(perc)
     ! TODO: this **must** be fixed before testing or the world **will** end
 
     ! would this even work?! this is so cursed...
-    print *, 'sorting observations in time order'
+    if (odt%my_pe == 0) print *, 'sorting observations in time order'
+    ! if (odt%my_pe == 0) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 1) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 24) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 78) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 0) print *, obs_set_sort(500)%time_actual
     call qsort(c_loc(obs_set_sort(1)), int(odt%our_num_obs, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
+    ! if (odt%my_pe == 0) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 1) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 24) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 78) print *, obs_set_sort(1)%time_actual
+    ! if (odt%my_pe == 0) print *, obs_set_sort(500)%time_actual
     ! call sort_obs_send_by_time(odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, our_num_obs)
 
+    call dbg_print('test') ! make sure my debug print works
     ! force a leave; we need to test everything happening earlier first!
-    return
+    ! return
+    call dbg_print('getting samples')
     j = 1
     do i = 1, our_num_obs
         if (is_selected(i) == 1) then
@@ -508,28 +534,51 @@ subroutine samplesort_obs(perc)
             ! our_samples(j) = odt%obs_buf%
         endif
     enddo
+    ! if (odt%my_pe == 0) print *, j
+    ! if (odt%my_pe == 0) print *, our_sample_num
+    ! if (odt%my_pe == 0) print *, 'PE: ', odt%my_pe, our_samples(1)
+    ! if (odt%my_pe == 1) print *, 'PE: ', odt%my_pe, our_samples(1)
+    ! if (odt%my_pe == 24) print *, 'PE: ', odt%my_pe, our_samples(1)
+    ! if (odt%my_pe == 78) print *, 'PE: ', odt%my_pe, our_samples(1)
+    ! if (odt%my_pe == 124) print *, 'PE: ', odt%my_pe, our_samples(1)
 
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     ! perform gather to retrieve samples 
 
-    call mpi_gather(our_samples, our_sample_num, MPI_INTEGER8, all_samples, all_sample_num, MPI_INTEGER8, 0, MPI_COMM_WORLD, &
+    call dbg_print('gathering all samples')
+    call mpi_gather(our_samples, our_sample_num, MPI_INTEGER8, all_samples, our_sample_num, MPI_INTEGER8, 0, MPI_COMM_WORLD, &
     odt%ierror)
 
     ! if first process sort time samples using qsort and select p - 1 samples from this set
     ! allocate for all processes to store bucket vars
+    call dbg_print('sorting samples and selecting new ones')
     allocate(scnd_selection(odt%nprocs - 1))
     if (odt%my_pe == 0) then
-        per_proc = all_sample_num / odt%nprocs
+        per_proc = our_sample_num
+        print *, all_samples(1)
         call qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
+        print *, all_samples(1)
+        ! do i = 1, all_sample_num
+        !     print *, all_samples(i)
+        ! enddo
         do i = 1, odt%nprocs - 1
             scnd_selection(i) = all_samples(i * per_proc)
         enddo
         print *, 'next steps...'
+        do i = 1, odt%nprocs - 1
+            print *, scnd_selection(i)
+        enddo
+        ! print *, scnd_selection(1)
+        ! print *, scnd_selection(2)
+        ! print *, scnd_selection(3)
     endif
 
+    call dbg_print('broadcasting new samples')
     call mpi_bcast(scnd_selection, odt%nprocs - 1, MPI_INTEGER8, 0, MPI_COMM_WORLD, odt%ierror)
 
+    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! return
     ! Now we have buckets in which to sort elements
     ! NOTE: maybe also use these buckets as indicators as to which processes are likely to have which elements
     ! storing / duplicating such information should take a minimal amount of memory (8 bytes (time) * nprocs)
@@ -542,12 +591,14 @@ subroutine samplesort_obs(perc)
     allocate(bucket_cnt(odt%nprocs))
     k = our_samples(1)
     bucket_disp(1) = 0
+    l = 1
     do i = 1, odt%nprocs
         j = 0
         if (i < odt%nprocs) then
-            do while (k < scnd_selection(i))
+            do while (l <= our_sample_num .and. k < scnd_selection(i))
                 j = j + 1
-                k = our_samples(j)
+                l = l + 1
+                if (l < our_sample_num) k = our_samples(l)
             enddo
         else
             ! print *, 'alt case where we are at last process'
@@ -555,20 +606,34 @@ subroutine samplesort_obs(perc)
         endif
         bucket_cnt(i) = j
         if (i /= odt%nprocs) bucket_disp(i + 1) = j + bucket_disp(i)
-        print *, 'do something else lol'
+        ! print *, 'do something else lol'
     enddo
+
+    if (odt%my_pe == 0) then
+        print *, 'bucket_cnt'
+        do i = 1, odt%nprocs
+            print *, bucket_cnt(i)
+        enddo
+        print *, 'bucket_disp'
+        do i = 1, odt%nprocs
+            print *, bucket_disp(i)
+        enddo
+    endif
+
+    call mpi_barrier(MPI_COMM_WORLD, ierror)
+    ! return 
 
     ! check for identical sets of keys
     ! If a bucket has no elements, that likely means the previous key engulfed all elements
     ! split the elements placed into that bucket across all buckets that have the same key 
-    i = 1
-    do while (i <= odt%nprocs)
+    i = 2
+    do while (i < odt%nprocs)
     !do i = 1, odt%nprocs
-        if (bucket_cnt(i) == 0) then
-            print *, 'haaah'
+        if (bucket_cnt(i) == 0 .and. scnd_selection(i) == scnd_selection(i-1)) then
+            ! print *, 'haaah'
             j = i
             k = 0
-            do while (j + k < odt%nprocs .and. bucket_cnt(j + k) == 0)
+            do while (j + k < odt%nprocs .and. bucket_cnt(j + k) == 0 .and. scnd_selection(j+k) == scnd_selection(i-1))
                 k = k + 1
             enddo
             k = k + 1
@@ -580,6 +645,7 @@ subroutine samplesort_obs(perc)
                 if (l < iden_rem) then
                     bucket_cnt((i-1) + l) = bucket_cnt((i - 1) + l) + 1
                 endif
+                l = l + 1
             enddo
             i = j + k - 1
         else
@@ -587,13 +653,25 @@ subroutine samplesort_obs(perc)
         endif
     enddo
 
+    allocate(new_cnt(odt%nprocs))
+    allocate(new_disp(odt%nprocs))
+
+    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! return
     ! alltoall on the displacement and count vars
-    call mpi_alltoall(MPI_IN_PLACE, odt%nprocs, MPI_INTEGER8, bucket_disp, odt%nprocs, MPI_INTEGER8, MPI_COMM_WORLD, &
+    call dbg_print('attempting to run alltoall #1')
+
+    call mpi_alltoall(bucket_cnt, 1, MPI_INTEGER, new_cnt, 1, MPI_INTEGER, MPI_COMM_WORLD, &
         odt%ierror)
 
-    call mpi_alltoall(MPI_IN_PLACE, odt%nprocs, MPI_INTEGER8, bucket_disp, odt%nprocs, MPI_INTEGER8, MPI_COMM_WORLD, &
-        odt%ierror)
+    call dbg_print('attempting to run alltoall #2')
 
+    ! call mpi_alltoall(bucket_disp, 1, MPI_INTEGER, new_disp, 1, MPI_INTEGER, MPI_COMM_WORLD, &
+    !     odt%ierror)
+
+    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
+    return
     ! alltoallv on the elements themselves
     ! (probably the most expensive component of this algorithm)
 
