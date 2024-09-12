@@ -432,7 +432,7 @@ subroutine samplesort_obs(perc)
     integer                             :: all_sample_num
     integer                             :: our_sample_num
     integer                             :: sample_cnt
-    integer                             :: j, i, per_proc, k, l
+    integer                             :: j, i, per_proc, k, l, is_last, m, check
     real                                :: start_random
     integer                             :: rand_idx
     integer                             :: our_num_obs
@@ -440,9 +440,13 @@ subroutine samplesort_obs(perc)
     integer                             :: new_vals_num
     integer, allocatable                :: bucket_cnt(:)
     integer, allocatable                :: bucket_disp(:)
+    integer, allocatable                :: val_disp(:)
     integer, allocatable                :: new_cnt(:)
     integer, allocatable                :: new_disp(:)
+    integer, allocatable                :: new_val_disp(:)
+    integer, allocatable                :: val_qc_rdisp(:)
     integer, allocatable                :: val_qc_cnt(:)
+    integer, allocatable                :: new_val_qc_cnt(:)
     integer, allocatable                :: val_qc_disp(:)
     integer(i8), allocatable,target     :: all_samples(:)
     integer(i8), allocatable            :: our_samples(:)
@@ -514,6 +518,9 @@ subroutine samplesort_obs(perc)
     ! if (odt%my_pe == 78) print *, obs_set_sort(1)%time_actual
     ! if (odt%my_pe == 0) print *, obs_set_sort(500)%time_actual
     call qsort(c_loc(obs_set_sort(1)), int(odt%our_num_obs, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
+
+    ! convert back so our unpacked obs matches the sorting of our packed observations
+    call convert_obs_set(obs_set_sort, odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, odt%our_num_obs)
     ! if (odt%my_pe == 0) print *, obs_set_sort(1)%time_actual
     ! if (odt%my_pe == 1) print *, obs_set_sort(1)%time_actual
     ! if (odt%my_pe == 24) print *, obs_set_sort(1)%time_actual
@@ -556,19 +563,19 @@ subroutine samplesort_obs(perc)
     allocate(scnd_selection(odt%nprocs - 1))
     if (odt%my_pe == 0) then
         per_proc = our_sample_num
-        print *, all_samples(1)
+        ! print *, all_samples(1)
         call qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
-        print *, all_samples(1)
+        ! print *, all_samples(1)
         ! do i = 1, all_sample_num
         !     print *, all_samples(i)
         ! enddo
         do i = 1, odt%nprocs - 1
             scnd_selection(i) = all_samples(i * per_proc)
         enddo
-        print *, 'next steps...'
-        do i = 1, odt%nprocs - 1
-            print *, scnd_selection(i)
-        enddo
+        ! print *, 'next steps...'
+        ! do i = 1, odt%nprocs - 1
+        !     print *, scnd_selection(i)
+        ! enddo
         ! print *, scnd_selection(1)
         ! print *, scnd_selection(2)
         ! print *, scnd_selection(3)
@@ -589,21 +596,70 @@ subroutine samplesort_obs(perc)
     ! TODO: We'll handle that case later
     allocate(bucket_disp(odt%nprocs))
     allocate(bucket_cnt(odt%nprocs))
+    check = 0
     k = our_samples(1)
     bucket_disp(1) = 0
     l = 1
     do i = 1, odt%nprocs
         j = 0
-        if (i < odt%nprocs) then
-            do while (l <= our_sample_num .and. k < scnd_selection(i))
+        ! if (i < odt%nprocs) then
+        !     do while (l <= our_sample_num .and. k < scnd_selection(i))
+        !         j = j + 1
+        !         l = l + 1
+        !         if (l <= our_sample_num) k = our_samples(l)
+        !     enddo
+        ! else if (i == odt%nprocs) then
+        !     do while (l <= our_sample_num)
+        !         j = j + 1
+        !         l = l + 1
+        !         if (l <= our_sample_num) k = our_samples(l)
+        !     enddo
+        ! endif
+        do while (l <= our_sample_num)
+            ! do while ((i < odt%nprocs .and. k < scnd_selection(i)) .or. (i == odt%nprocs .and. k >= scnd_selection(i - 1)))
+            do
+                ! print *, 'l: ' , l
+                ! print *, 'our_sample_num: ' , our_sample_num
+                if (i < odt%nprocs) then
+                    ! if (k < scnd_selection(i)) then
+                    !     check = 1
+                    ! else
+                    !     exit
+                    ! endif
+                    ! print *, 'banana'
+                    if (k >= scnd_selection(i)) exit
+                endif
+                if (i == odt%nprocs) then
+                    ! if (k >= scnd_selection(i - 1)) then
+                    !     check = 1
+                    ! else
+                    !     exit
+                    ! endif
+                    ! print *, 'apple'
+                    if (k < scnd_selection(i - 1)) exit
+                endif
                 j = j + 1
                 l = l + 1
-                if (l < our_sample_num) k = our_samples(l)
+                ! print *, 'why????'
+                if (l <= our_sample_num) k = our_samples(l)
+                if (l == our_sample_num + 1) exit
             enddo
-        else
-            ! print *, 'alt case where we are at last process'
-            j = odt%total_obs - bucket_disp(odt%nprocs) 
-        endif
+            ! print *, 'honk' 
+            exit
+        enddo
+        ! if (i < odt%nprocs) then
+        !     do while (l <= our_sample_num .and. k < scnd_selection(i))
+        !         j = j + 1
+        !         l = l + 1
+        !         if (l <= our_sample_num) k = our_samples(l)
+        !     enddo
+        !     if (l > our_sample_num) exit
+        ! else
+        !     ! print *, 'alt case where we are at last process'
+        !     ! this is *not* correct; must fix
+        !
+        !     j = odt%total_obs - bucket_disp(odt%nprocs) 
+        ! endif
         bucket_cnt(i) = j
         if (i /= odt%nprocs) bucket_disp(i + 1) = j + bucket_disp(i)
         ! print *, 'do something else lol'
@@ -620,6 +676,7 @@ subroutine samplesort_obs(perc)
         enddo
     endif
 
+    print *, odt%my_pe, 'reached barrier'
     call mpi_barrier(MPI_COMM_WORLD, ierror)
     ! return 
 
@@ -627,35 +684,67 @@ subroutine samplesort_obs(perc)
     ! If a bucket has no elements, that likely means the previous key engulfed all elements
     ! split the elements placed into that bucket across all buckets that have the same key 
     i = 2
-    do while (i < odt%nprocs)
+    do while (i <= odt%nprocs)
     !do i = 1, odt%nprocs
-        if (bucket_cnt(i) == 0 .and. scnd_selection(i) == scnd_selection(i-1)) then
+        ! print *, 'From process', odt%my_pe, ': i = ', i
+        m = 0
+        is_last = 0
+        if (bucket_cnt(i) == 0) then
             ! print *, 'haaah'
-            j = i
-            k = 0
-            do while (j + k < odt%nprocs .and. bucket_cnt(j + k) == 0 .and. scnd_selection(j+k) == scnd_selection(i-1))
+            if (i == odt%nprocs) then
+                is_last = 0
+            else if (scnd_selection(i) == scnd_selection(i - 1)) then
+                is_last = 1
+            endif
+            if (is_last) then
+                j = i
+                k = 0
+                do while (j + k < odt%nprocs .and. m == 0) 
+                    if (bucket_cnt(j + k) == 0 .and. scnd_selection(j+k) == scnd_selection(i-1)) then
+                        k = k + 1
+                    else
+                        m = 1
+                    endif
+                enddo
                 k = k + 1
-            enddo
-            k = k + 1
-            iden_vals = bucket_cnt(i - 1) / k
-            iden_rem = modulo(bucket_cnt(i - 1), k)
-            l = 0
-            do while (l < k)
-                bucket_cnt((i-1) + l) = iden_vals
-                if (l < iden_rem) then
-                    bucket_cnt((i-1) + l) = bucket_cnt((i - 1) + l) + 1
-                endif
-                l = l + 1
-            enddo
-            i = j + k - 1
+                iden_vals = bucket_cnt(i - 1) / k
+                iden_rem = modulo(bucket_cnt(i - 1), k)
+                l = 0
+                do while (l < k)
+                    bucket_cnt((i-1) + l) = iden_vals
+                    if (l < iden_rem) then
+                        bucket_cnt((i-1) + l) = bucket_cnt((i - 1) + l) + 1
+                    endif
+                    l = l + 1
+                enddo
+                i = j + k - 1
+            else
+                i = i + 1
+            endif
         else
             i = i + 1
         endif
     enddo
 
+    ! process i in new_cnt(i): how many elements are we receiving?
     allocate(new_cnt(odt%nprocs))
-    allocate(new_disp(odt%nprocs))
 
+    ! displacement of the elements in the buffer for process i
+    ! process(i) = where on process(i) do the elements start?
+    allocate(new_disp(odt%nprocs))
+    ! allocate(val_qc_disp(odt%nprocs))
+
+    ! displacement of values on each process i 
+    allocate(new_val_disp(odt%nprocs))
+
+    ! allocate(val_qc_rdisp(odt%nprocs))
+    allocate(new_val_qc_cnt(odt%nprocs))
+    ! number of values to be sent to each process from *our* process
+    allocate(val_qc_cnt(odt%nprocs))
+    ! displacement of values/qc in buffer for *our* process
+    allocate(val_qc_disp(odt%nprocs))
+
+    print *, 'Process ', odt%my_pe, ' reached barrier #2'
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! return
     ! alltoall on the displacement and count vars
@@ -666,19 +755,17 @@ subroutine samplesort_obs(perc)
 
     call dbg_print('attempting to run alltoall #2')
 
-    ! call mpi_alltoall(bucket_disp, 1, MPI_INTEGER, new_disp, 1, MPI_INTEGER, MPI_COMM_WORLD, &
-    !     odt%ierror)
+    call mpi_alltoall(bucket_disp, 1, MPI_INTEGER, new_disp, 1, MPI_INTEGER, MPI_COMM_WORLD, &
+        odt%ierror)
 
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
-    return
+    ! return
     ! alltoallv on the elements themselves
     ! (probably the most expensive component of this algorithm)
 
     ! note: need to modify count and disp for values/qc since each
     ! observation may have more than one
-    allocate(val_qc_cnt(odt%nprocs))
-    allocate(val_qc_disp(odt%nprocs))
     val_qc_cnt(1:odt%nprocs) = bucket_cnt(1:odt%nprocs)
     val_qc_disp(1:odt%nprocs) = bucket_disp(1:odt%nprocs)
 
@@ -690,33 +777,75 @@ subroutine samplesort_obs(perc)
         val_qc_disp(i) = val_qc_disp(i - 1) + val_qc_cnt(i) 
     enddo
 
+    call dbg_print("attempting to run alltoall #3")
+    ! send new val_qc displacement to every process
+    call mpi_alltoall(val_qc_disp, 1, MPI_INTEGER, new_val_disp, 1, MPI_INTEGER, MPI_COMM_WORLD, &
+        odt%ierror)
+
+    ! return
 
     ! determine the num of observations we will receive
     new_obs_num = 0
     do i = 1, odt%nprocs
-        new_obs_num = new_obs_num + bucket_cnt(i)
+        new_obs_num = new_obs_num + new_cnt(i)
     enddo
 
+    ! calculate rdisp using cnt previously sent using alltoall
+    ! val_qc_rdisp(1) = 0
+    ! do i = 2, odt%nprocs
+    !     val_qc_rdisp(i) = val_qc_rdisp(i - 1) + new_cnt(i - 1)
+    ! enddo
+
+
+    ! new_disp(1) = 0
+    ! do i = 2, odt%nprocs
+    !     new_disp(i) = new_disp(i - 1) + new_cnt(i - 1) ! represents sdisp
+    ! enddo
+
+    new_val_qc_cnt(1:odt%nprocs) = new_cnt(1:odt%nprocs) * odt%num_vals_per_obs
     new_vals_num = new_obs_num * odt%num_vals_per_obs
 
+
+    allocate(new_obs_set(new_obs_num))
+    allocate(new_val_qc(new_vals_num))
+
+    ! sdisp: displacement from send buffer
+    ! rdisp: where in receive buffer elems will be stored
+    if (odt%my_pe == 2) then
+        print *, 'new_cnt: ' 
+        do i = 1, odt%nprocs
+            print *, new_cnt(i)
+        enddo
+        print *, 'new_disp: ' 
+        do i = 1, odt%nprocs
+            print *, new_disp(i)
+        enddo
+    endif
+    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
+    return 
+
     ! alltoallv both the observations and the values
-    call mpi_alltoallv(odt%obs_buf, bucket_cnt, bucket_disp, odt%obs_mpi, new_obs_set, bucket_cnt, bucket_disp, odt%obs_mpi, &
+    call mpi_alltoallv(odt%obs_buf, bucket_cnt, bucket_disp, odt%obs_mpi, new_obs_set, new_cnt, new_disp, odt%obs_mpi, &
         MPI_COMM_WORLD, odt%ierror)
 
-
-    call mpi_alltoallv(odt%val_buf, val_qc_cnt, val_qc_disp, odt%val_mpi, new_val_qc, val_qc_cnt, val_qc_disp, odt%val_mpi, &
+    call mpi_alltoallv(odt%val_buf, val_qc_cnt, val_qc_disp, odt%val_mpi, new_val_qc, new_val_qc_cnt, new_val_disp, odt%val_mpi, &
         MPI_COMM_WORLD, odt%ierror)
+
+    ! return 
 
     ! Final sort of the observations on each process
     call qsort(c_loc(new_obs_set(1)), int(new_obs_num, c_size_t), sizeof(new_obs_set(1)), c_funloc(compare_obs))
     call qsort(c_loc(new_val_qc(1)), int(new_vals_num, c_size_t), sizeof(new_obs_set(1)), c_funloc(compare_vals))
 
+    
     ! set our global pointers to the new sets and deallocate the old sets
     deallocate(odt%obs_buf)
     deallocate(odt%val_buf)
     odt%obs_buf => new_obs_set
     odt%val_buf => new_val_qc
 
+    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! 1. select set of samples from every process's observation sequences
     !    (1% of the total observation sequence)
     ! 2. every process sends its sample set to first process
