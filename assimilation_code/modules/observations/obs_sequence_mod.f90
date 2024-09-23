@@ -1490,8 +1490,10 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 call samplesort_obs(1)
+call destroy_obs_window()
 return
 
+! if (odt%my_pe == 0) print *, 'dist_type = ', dist_type
 if (dist_type == 0) then
     call dist_obs_set(buffer, ordered_buf, total_obs, total_copies, mpi_num, 0, 0)
 else
@@ -1519,11 +1521,11 @@ endif
 ! call mpi_win_fence(0, odt%val_win, ierror)
 
 
-if (my_task_id() == 1) then
-    print *, odt%val_buf(1)%val
-    print *, odt%val_buf(2)%val
-    print *, odt%val_buf(3)%val
-endif
+! if (my_task_id() == 1) then
+!     print *, odt%val_buf(1)%val
+!     print *, odt%val_buf(2)%val
+!     print *, odt%val_buf(3)%val
+! endif
 size = 1
 total_obs = total_obs / size
 if (my_task_id() < size .and. dist_type == 1) then
