@@ -1187,7 +1187,7 @@ subroutine calc_obs_params(obs_size, my_pe, num_pes, num_obs, start_pos, obs_pos
 
     obs_offset = obs_per_proc * my_pe
     obs_pos_offset = int(obs_size, i8) * int(obs_offset, i8)
-    print *, obs_pos_offset
+    ! print *, obs_pos_offset
     obs_pos = obs_pos + obs_pos_offset
     starting_obs = starting_obs + obs_offset
     
@@ -1489,9 +1489,9 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 ! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-call samplesort_obs(1)
-call destroy_obs_window()
-return
+! call samplesort_obs(1)
+! call destroy_obs_window()
+! return
 
 ! if (odt%my_pe == 0) print *, 'dist_type = ', dist_type
 if (dist_type == 0) then
