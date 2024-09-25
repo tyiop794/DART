@@ -214,6 +214,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     if (my_task_id() == root) then 
         ! sort observations in linked list traversal order using quicksort
         print *, 'after gather'
+        ! call print_obs_send(all_conv_set(554841856))
         call sort_obs_send_by_time(all_conv_set, all_values_qc, num_values, num_obs)
         print *, 'sorted by time (timestamp added)'
         ! call sort_roundrobin_inplace(all_conv_set, all_values_qc, num_obs, num_values, nprocs)
@@ -752,12 +753,20 @@ subroutine samplesort_obs(perc)
     deallocate(odt%val_buf)
     odt%obs_buf => new_obs_set
     odt%val_buf => new_val_qc
+    odt%our_num_obs = new_obs_num
 
     ! used to indicate which processes hold which obs time ranges
     ! (same as the buckets)
     odt%indicator => scnd_selection
 
     call dbg_print('made it to the end')
+    if (odt%my_pe == 0) then
+        call print_obs_send(new_obs_set(1))
+    endif
+    if (odt%my_pe == odt%nprocs) then
+        call print_obs_send(new_obs_set(new_obs_num))
+    endif
+
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! 1. select set of samples from every process's observation sequences
     !    (1% of the total observation sequence)
@@ -1120,8 +1129,9 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     ! need to allocate two massive arrays
     type(obs_type_send), target,        intent(inout)       :: obs_set(num_obs)
     type(obs_values_qc_type), target,   intent(inout)       :: values_qc(num_obs * num_values)
-    integer,                            intent(in)          :: num_values, num_obs
+    integer,                            intent(in)          :: num_values, num_obs 
     integer                                                 :: i, next_time, j, k, val_idx, x, total_values, l
+    integer                                                 :: start
     integer(C_SIZE_T)                                       :: num_obs_c, total_vals_c, sizeof_val, sizeof_obs
     ! integer                                                 :: test(4), test_2(4), 
 
@@ -1130,10 +1140,16 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     i = 1
     j = 1
     k = 1
+    start = 0
     obs_set(1:odt%total_obs)%time_order = 0
+    values_qc(1:odt%total_obs*odt%num_vals_per_obs)%time_order = 0
     do while (i /= -1)
         ! if (modulo(i, 10000) == 0) print *, 'i = ', i
         l = get_obs_offset(i)
+        if (i /= obs_set(l)%key .and. start == 0) then
+            print *, 'i = ', i, 'key = ', obs_set(l)%key
+            start = 1
+        endif
 
         obs_set(l)%time_order = j 
         ! obs_set(i)%time_order = num_obs - j
@@ -1152,13 +1168,24 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
         ! if (i == 16777217) print *, 'i (l = 16777217): ', i
         j = j + 1
     enddo
+    print *, 'l : ', l
+    print *, 'j: ', j
+    call print_obs_send(obs_set(l))
 
+    start = 0
     do i = 1, odt%total_obs
-        if (obs_set(i)%time_order == 0) then
-            print *, 'uh oh!'
+        if (obs_set(i)%time_order == 0 .and. start == 0) then
+            print *, 'key: ', obs_set(i)%key
+            call print_obs_send(obs_set(i))
+            start = 1
         endif
     enddo
-    ! print *, 'Made it to qsort!'
+    ! do i = 1, odt%total_obs * odt%num_vals_per_obs
+    !     if (values_qc(i)%time_order == 0) then
+    !         print *, 'uh oh!'
+    !     endif
+    ! enddo
+    print *, 'Made it to qsort!'
 
     total_values = num_obs * num_values
     total_vals_c = total_values

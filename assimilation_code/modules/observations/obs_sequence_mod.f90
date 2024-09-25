@@ -1425,9 +1425,9 @@ if (my_pe >= 0) then
     ! print *, 'hi!'
     ! do j = 1, num_obs
     do j = 1, my_obs
-        if (modulo(j, 1000000) == 0 .and. mpi_num == 1) then
-            print *, 'j = ', j
-        endif
+        ! if (modulo(j, 1000000) == 0 .and. mpi_num == 1) then
+        !     print *, 'j = ', j
+        ! endif
        ! if observation is in our set, read
        ! no need to read if we are past our upper bound
        ! if (j > upper_bound) exit
@@ -1444,6 +1444,12 @@ if (my_pe >= 0) then
         ! Also set the key in the obs
         ! Make sure the key is absolute, not relative to the observations being read by this proc
            buffer(j)%key = x
+           ! if (buffer(j)%key == 626703695) then
+           !     print * 'key(626703695)%next_time ==', buffer(j)%next_time
+           ! endif
+           ! if (buffer(j)%key == 554841522) then
+           !
+           ! endif
            ! seq%keys(j) = x
            ! next_obs_keys(j) = buffer(j)%next_time
            x = x + 1
@@ -1456,9 +1462,9 @@ if (my_pe >= 0) then
                x = (total_obs - rem) + my_pe + 1
                ! print *, x
            endif
-           if (buffer(j)%key == total_obs) then
-               buffer(j)%next_time = -1
-           endif
+           ! if (buffer(j)%key == total_obs) then
+           !     buffer(j)%next_time = -1
+           ! endif
            ! create separate arrays so that values and qc can be sent contiguously
            ! better to calculate this when we've already decided the order in which array will be sent
            !send_values(j*num_copies:(j+1)*num_copies) = buffer(j)%values(1:num_copies)
@@ -1489,9 +1495,9 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 ! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-! call samplesort_obs(1)
-! call destroy_obs_window()
-! return
+call samplesort_obs(1)
+call destroy_obs_window()
+return
 
 ! if (odt%my_pe == 0) print *, 'dist_type = ', dist_type
 if (dist_type == 0) then
