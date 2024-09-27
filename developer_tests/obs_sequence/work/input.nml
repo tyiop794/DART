@@ -1,5 +1,5 @@
 &test_obsseq_rw_nml
-        file_in  = '/glade/derecho/scratch/kyousuf/DART/developer_tests/obs_sequence/work/obs_massive.bin'
+        file_in  = '/glade/derecho/scratch/kyousuf/DART/developer_tests/obs_sequence/work/obs_gigantic.bin'
         file_out = 'obs_seq.final'
 /
 

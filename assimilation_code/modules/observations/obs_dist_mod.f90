@@ -73,6 +73,7 @@ module obs_dist_mod
        integer :: prev_time, next_time
        integer :: cov_group
        integer :: time_order
+       integer :: val_idx
        integer(i8) :: time_actual
        real(r8) :: lon
        real(r8) :: lat
@@ -518,11 +519,11 @@ subroutine samplesort_obs(perc)
 
     ! Convert back to packed to make sorting obs easier
     ! Note: this is inefficient; we're making a full copy of every observation just for conversion; is there an alternative to this?
-    if (odt%my_pe == 0) print *, 'Converting observations to packed set'
-    call allocate_obs_set(obs_set_sort, our_num_obs, odt%num_vals_per_obs)
+    ! if (odt%my_pe == 0) print *, 'Converting observations to packed set'
+    ! call allocate_obs_set(obs_set_sort, our_num_obs, odt%num_vals_per_obs)
     
     ! Note: this is when time_actual is first set
-    call convert_obs_back(obs_set_sort, odt%obs_buf, odt%val_buf, our_num_obs, odt%num_vals_per_obs)
+    ! call convert_obs_back(obs_set_sort, odt%obs_buf, odt%val_buf, our_num_obs, odt%num_vals_per_obs)
 
     ! Overwrite time_actual (testing purposes)
     ! only do this if test_mode is 1
@@ -536,20 +537,34 @@ subroutine samplesort_obs(perc)
             call random_number(start_random)
             rand_idx = floor(start_random * our_num_obs) + 1
             ! rand_idx = 1
-            obs_set_sort(i)%time_actual = rand_idx
+            ! obs_set_sort(i)%time_actual = rand_idx
             odt%obs_buf(i)%time_actual = rand_idx
         enddo
     endif
 
     ! would this even work?! this is so cursed...
     if (odt%my_pe == 0) print *, 'sorting observations in time order'
-    call qsort(c_loc(obs_set_sort(1)), int(odt%our_num_obs, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
+    ! call qsort(c_loc(obs_set_sort(1)), int(odt%our_num_obs, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
 
     ! qsort but just the unpacked obs (i have an idea)
-    ! call qsort(c_loc(odt%obs_buf(1)), int(odt%our_num_obs, ))
+    call qsort(c_loc(odt%obs_buf(1)), int(odt%our_num_obs, c_size_t), sizeof(odt%obs_buf(1)), c_funloc(compare_obs))
+
+    ! set associated times for values (to sort values properly)
+    l = 1
+    do i = 1, odt%our_num_obs
+        ! assume that every obs has same num of values
+        do j = 1, odt%num_vals_per_obs
+            odt%val_buf(odt%obs_buf(i)%val_idx + j - 1)%time_order = l
+            l = l + 1
+        enddo
+    enddo
+
+    ! now sort the values separately
+    call qsort(c_loc(odt%val_buf(1)), int(odt%our_num_obs * odt%num_vals_per_obs, c_size_t), sizeof(odt%val_buf(1)), &
+    c_funloc(compare_vals))
 
     ! convert back so our unpacked obs matches the sorting of our packed observations
-    call convert_obs_set(obs_set_sort, odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, odt%our_num_obs)
+    ! call convert_obs_set(obs_set_sort, odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, odt%our_num_obs)
 
     call dbg_print('test') ! make sure my debug print works
     ! force a leave; we need to test everything happening earlier first!
@@ -558,7 +573,7 @@ subroutine samplesort_obs(perc)
     j = 1
     do i = 1, our_num_obs
         if (is_selected(i) == 1) then
-            curr_time = obs_set_sort(i)%time_actual
+            curr_time = odt%obs_buf(i)%time_actual
             our_samples(j) = curr_time
             j = j + 1
             ! our_samples(j) = odt%obs_buf%
@@ -783,10 +798,15 @@ subroutine samplesort_obs(perc)
 
     call dbg_print('attempting alltoallv #1')
     ! alltoallv both the observations and the values
+    ! call mpi_alltoallv(odt%obs_buf, bucket_cnt, bucket_disp, odt%obs_mpi, new_obs_set, new_cnt, new_disp, odt%obs_mpi, &
+    !     MPI_COMM_WORLD, odt%ierror)
     call mpi_alltoallv(odt%obs_buf, bucket_cnt, bucket_disp, odt%obs_mpi, new_obs_set, new_cnt, new_disp, odt%obs_mpi, &
         MPI_COMM_WORLD, odt%ierror)
 
     call dbg_print('attempting alltoallv #2')
+
+    ! call mpi_alltoallv(odt%val_buf, val_qc_cnt, val_qc_disp, odt%val_mpi, new_val_qc, new_val_qc_cnt, new_val_disp, odt%val_mpi, &
+    !     MPI_COMM_WORLD, odt%ierror)
 
     call mpi_alltoallv(odt%val_buf, val_qc_cnt, val_qc_disp, odt%val_mpi, new_val_qc, new_val_qc_cnt, new_val_disp, odt%val_mpi, &
         MPI_COMM_WORLD, odt%ierror)
@@ -795,14 +815,39 @@ subroutine samplesort_obs(perc)
     call dbg_print("hahahahahahahahha")
 
     ! Final sort of the observations on each process
-    call deallocate_obs_set(obs_set_sort, our_num_obs, odt%num_vals_per_obs) 
-    call allocate_obs_set(obs_set_sort, new_obs_num, odt%num_vals_per_obs) 
-    call convert_obs_back(obs_set_sort, new_obs_set, new_val_qc, new_obs_num, odt%num_vals_per_obs)
+    ! call deallocate_obs_set(obs_set_sort, our_num_obs, odt%num_vals_per_obs) 
+    ! call allocate_obs_set(obs_set_sort, new_obs_num, odt%num_vals_per_obs) 
+    ! call convert_obs_back(obs_set_sort, new_obs_set, new_val_qc, new_obs_num, odt%num_vals_per_obs)
     call dbg_print("hahahahahahahahha")
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! return
-    call qsort(c_loc(obs_set_sort(1)), int(new_obs_num, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
-    call convert_obs_set(obs_set_sort, new_obs_set, new_val_qc, odt%num_vals_per_obs, new_obs_num)
+
+    ! reset val_idx before performing next qsort
+    l = 1
+    do i = 1, new_obs_num
+        new_obs_set(i)%val_idx = l
+        l = l + odt%num_vals_per_obs
+    enddo
+
+    ! qsort but just the unpacked obs (i have an idea)
+    call qsort(c_loc(new_obs_set(1)), int(new_obs_num, c_size_t), sizeof(new_obs_set(1)), c_funloc(compare_obs))
+
+    ! set associated times for values (to sort values properly)
+    l = 1
+    do i = 1, new_obs_num
+        ! assume that every obs has same num of values
+        do j = 1, odt%num_vals_per_obs
+            new_val_qc(new_obs_set(i)%val_idx + j - 1)%time_order = l
+            l = l + 1
+        enddo
+    enddo
+
+    ! now sort the values separately
+    call qsort(c_loc(new_val_qc(1)), int(new_vals_num, c_size_t), sizeof(new_val_qc(1)), &
+    c_funloc(compare_vals))
+
+    ! call qsort(c_loc(obs_set_sort(1)), int(new_obs_num, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
+    ! call convert_obs_set(obs_set_sort, new_obs_set, new_val_qc, odt%num_vals_per_obs, new_obs_num)
     
     ! set our global pointers to the new sets and deallocate the old sets
     deallocate(odt%obs_buf)
@@ -816,12 +861,12 @@ subroutine samplesort_obs(perc)
     odt%indicator => scnd_selection
 
     call dbg_print('made it to the end')
-    if (odt%my_pe == 0) then
-        call print_obs_send(new_obs_set(1))
-    endif
-    if (odt%my_pe == odt%nprocs - 1) then
-        call print_obs_send(new_obs_set(new_obs_num))
-    endif
+    ! if (odt%my_pe == 0) then
+    !     call print_obs_send(new_obs_set(1))
+    ! endif
+    ! if (odt%my_pe == odt%nprocs - 1) then
+    !     call print_obs_send(new_obs_set(new_obs_num))
+    ! endif
 
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! 1. select set of samples from every process's observation sequences
@@ -1061,20 +1106,24 @@ subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     integer,                    intent(inout)    :: mpi_valstype
     integer :: rank, nprocs, ierror, i, num_ints, num_vars, num_doubles, num_logicals, num_longs
     integer :: num_vars_vals, num_ints_vals, num_doubles_vals
-    integer(MPI_ADDRESS_KIND) :: offsets(15), offsets_vals(4)
-    integer(MPI_ADDRESS_KIND) :: address(15), address_vals(4)
-    integer :: oldtypes(15), oldtypes_vals(4)
-    integer :: bl_var(15), bl_var_vals(4)
+    integer(MPI_ADDRESS_KIND) :: offsets(16), offsets_vals(4)
+    integer(MPI_ADDRESS_KIND) :: address(16), address_vals(4)
+    integer :: oldtypes(16), oldtypes_vals(4)
+    integer :: bl_var(16), bl_var_vals(4)
     type(obs_type_send) :: initial
+    ! type(obs_values_qc_type),target  :: val_placeholder(1)
     type(obs_values_qc_type) :: init_val
+    type(obs_values_qc_type), pointer :: null_ptr(:) 
+    ! null_ptr => NULL()
+    ! initial%vals_ptr => val_placeholder
     ! initial => odt%obs_buf(1)
 
     ! for obs_type_send
-    num_ints = 10 
+    num_ints = 11 
     num_doubles = 4
     num_logicals = 0
     num_longs = 1
-    num_vars = 15
+    num_vars = 16
     bl_var(1:num_vars) = 1 
 
     ! for  obs_values_qc_type
@@ -1095,11 +1144,15 @@ subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     call mpi_get_address(initial%next_time, address(8), ierror)
     call mpi_get_address(initial%cov_group, address(9), ierror)
     call mpi_get_address(initial%time_order, address(10), ierror)
-    call mpi_get_address(initial%time_actual, address(11), ierror)
-    call mpi_get_address(initial%lon, address(12), ierror)
-    call mpi_get_address(initial%lat, address(13), ierror)
-    call mpi_get_address(initial%vloc, address(14), ierror)
-    call mpi_get_address(initial%error_variance, address(15), ierror)
+    call mpi_get_address(initial%val_idx, address(11), ierror)
+    call mpi_get_address(initial%time_actual, address(12), ierror)
+    call mpi_get_address(initial%lon, address(13), ierror)
+    call mpi_get_address(initial%lat, address(14), ierror)
+    call mpi_get_address(initial%vloc, address(15), ierror)
+    call mpi_get_address(initial%error_variance, address(16), ierror)
+    ! call mpi_get_address(initial%vals_ptr, address(16), ierror)
+
+    ! can't do this since pointer is currently set to NULL
     ! call mpi_get_address(initial%vals_ptr, address(16), ierror)
 
     ! also do this for values_qc derived type
@@ -1108,10 +1161,16 @@ subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     call mpi_get_address(init_val%val, address_vals(3), ierror)
     call mpi_get_address(init_val%qc, address_vals(4), ierror)
 
+    ! if (odt%my_pe == 0) then
+    !     do i = 1, 16
+    !         print *, 'address(', i, '): ', address(i)
+    !     enddo
+    ! endif
     ! define types in struct in terms of base MPI datatypes
     oldtypes(1:num_ints) = MPI_INTEGER
-    oldtypes(11) = MPI_INTEGER8
+    oldtypes(num_ints + 1) = MPI_INTEGER8
     oldtypes(num_ints+num_longs+1:num_ints+num_longs+num_doubles) = MPI_REAL8
+    ! oldtypes(16) = MPI_AINT
     ! oldtypes(16) = MPI_AINT
 
     ! same with values_qc
@@ -1145,9 +1204,9 @@ function compare_obs(obs1, obs2) Bind(C)
     type(obs_type_send),       intent(in)       :: obs1, obs2 
     integer(c_int)                              :: compare_obs
 
-    if (obs1%time_order < obs2%time_order) then
+    if (obs1%time_actual < obs2%time_actual) then
         compare_obs = -1
-    else if (obs1%time_order > obs2%time_order) then
+    else if (obs1%time_actual > obs2%time_actual) then
         compare_obs = 1
     else
         compare_obs = 0
@@ -1774,6 +1833,8 @@ subroutine convert_obs_set(orig, out_obs, out_vals, num_values, num_obs)
             ! odt%val_buf(j+d-1)%time_actual = out_obs(i)%time_actual
             ! out_obs%vals_ptr => out_vals(j+d
         enddo
+        ! set the starting index
+        out_obs(i)%val_idx = d
         ! use this to associate observation with corresponding value
         ! out_obs(i)%vals_ptr => out_vals(d:d+num_values-1)
         ! values_qc(d:d+diff)%qc = set(i)%qc(1:num_values)
