@@ -1488,7 +1488,7 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! total_obs = num_obs_per_proc * mpi_num
 ! if (mpi_num > 1) then
 if (my_task_id() == 0) print *, 'Initializing obs window'
-call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type, mpi_num) 
+call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type, mpi_num, 0) 
 
 ! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
@@ -1496,6 +1496,10 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 call samplesort_obs(1)
+call mpi_barrier(MPI_COMM_WORLD, ierror)
+if (odt%test_mode) then
+    call samplesort_test()
+endif
 call destroy_obs_window()
 return
 
