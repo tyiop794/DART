@@ -10,6 +10,7 @@ program obs_sequence_tool
 
 use        types_mod, only : r8, missing_r8, metadatalength, obstypelength, &
                              MISSING_I
+use mpi
 
 use    utilities_mod, only : finalize_utilities, initialize_utilities, &
                              find_namelist_in_file, check_namelist_read, &
@@ -30,6 +31,7 @@ use     obs_kind_mod, only : max_defined_types_of_obs, get_name_for_type_of_obs,
 use time_manager_mod, only : time_type, operator(>), print_time, set_time, &
                              print_date, set_calendar_type, GREGORIAN
 
+use obs_dist_mod ! all of it for the time being; restrain later
 use obs_sequence_mod, only : obs_sequence_type, obs_type, write_obs_seq, &
                              init_obs, assignment(=), get_obs_def, set_obs_def, &
                              init_obs_sequence, static_init_obs_sequence, &
@@ -58,7 +60,10 @@ integer :: size_seq_in, num_copies_in, num_qc_in
 integer :: size_seq_out, num_copies_out, num_qc_out
 integer :: num_inserted, iunit, io, i, j, total_num_inserted
 integer :: max_num_obs, file_id, remaining_obs_count
-integer :: first_seq
+integer :: first_seq, cnt
+integer, allocatable :: num_obs_per_proc(:)
+integer, allocatable :: num_obs_per_file(:)
+integer, allocatable :: obs_per_file_per_proc(:)
 character(len=metadatalength) :: read_format, meta_data
 logical :: pre_I_format, all_gone
 logical :: trim_first, trim_last
@@ -88,6 +93,14 @@ integer :: copy_index_len      = 0
 integer :: qc_index_len        = 0
 
 
+! declare type to store gather info
+
+type gather_info
+    integer, allocatable    :: recvcount(:)
+    integer, allocatable    :: recvdisps(:)
+    integer                 :: sendcnt
+end type gather_info
+type(gather_info)           :: gi
 ! variables to manage whether or not the precomputed forward operator values
 ! are written out
 
@@ -422,7 +435,20 @@ size_seq_out     = 0
 
 ! pass 1:
 
+! Let's modify this slightly to make it parallel...
+! each process reads a header from a file
+! or possibly multiple, depending on how many files there are
+! gather total obs per file to first process (gatherv)
+! into array allocated size num_input_files
+! calculate num obs per proc on process 0 (easier to perform)
+! broadcast information to all processes
+allocate(num_obs_per_file(num_input_files))
+allocate(gi%recvcount(odt%nprocs))
+allocate(gi%recvdisps(odt%nprocs))
+! note: num_input_files / odt%my_pe may be 0; handle this case!
+allocate(obs_per_file_per_proc(num_input_files / odt%my_pe))
 first_seq = -1
+cnt = 1
 do i = 1, num_input_files
 
    if ( len(filename_seq(i)) .eq. 0 .or. filename_seq(i) .eq. "" ) then
@@ -430,85 +456,101 @@ do i = 1, num_input_files
          'num_input_files and filename_seq mismatch',source)
    endif
 
-   ! count up the number of observations we are going to eventually have.
-   ! if all the observations in a file are not part of the linked list, the
-   ! output number of observations might be much smaller than the total size in 
-   ! the header.  it is slower, but go ahead and read in the entire sequence
-   ! and count up the real number of obs - trim_seq will do the count even if
-   ! it is not trimming in time.  this allows us to create an empty obs_seq
-   ! output file of exactly the right size.
+   ! If we are designated reader for an obs file, then read 
+   if (modulo(i, odt%nprocs) == 0) then 
+       call read_obs_seq_header(filename_seq(i), num_copies_in, num_qc_in, &
+          size_seq_in, max_num_obs, file_id, read_format, pre_I_format, &
+          close_the_file = .true.)
 
-   call read_obs_seq_header(filename_seq(i), num_copies_in, num_qc_in, &
-      size_seq_in, max_num_obs, file_id, read_format, pre_I_format, &
-      close_the_file = .true.)
+        ! size_seq_in: number of observations in file
+        ! store this value in array 
+        obs_per_file_per_proc(cnt) = size_seq_in
+        cnt = cnt + 1
+    endif
+enddo
+
+! this is already getting messy....
+gi%sendcnt = cnt
+
+call mpi_gather(gi%sendcnt, 1, MPI_INTEGER, gi%recvcount, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, odt%ierror)
+call mpi_gatherv(obs_per_file_per_proc, gi%sendcnt, MPI_INTEGER, gi%recvcount, gi%recvdisps, MPI_INTEGER, & 
+    0, MPI_COMM_WORLD, odt%ierror)
+call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
+    
+
+
+
    
-   call read_obs_seq(filename_seq(i), 0, 0, 0, seq_in)
-   call trim_seq(seq_in, trim_first, first_obs_time, trim_last, last_obs_time, &
-                 filename_seq(i), .true., remaining_obs_count)
-   call destroy_obs_sequence(seq_in)
-   if (remaining_obs_count == 0) then
-      process_file(i) = .false.
-      write(msgstring1,*) 'No obs used from input sequence file ', trim(filename_seq(i))
-      call error_handler(E_MSG,'obs_sequence_tool',msgstring1)
-      cycle
-   else
-      process_file(i) = .true.
-      size_seq_in = remaining_obs_count
-   endif
+  ! for the time being, let's not trim the files; another can of worms to not open
+  ! also, under this system, we'll have enough memory to store all obs
+   ! call read_obs_seq(filename_seq(i), 0, 0, 0, seq_in)
+   ! call trim_seq(seq_in, trim_first, first_obs_time, trim_last, last_obs_time, &
+   !               filename_seq(i), .true., remaining_obs_count)
+   ! call destroy_obs_sequence(seq_in)
+   ! if (remaining_obs_count == 0) then
+   !    process_file(i) = .false.
+   !    write(msgstring1,*) 'No obs used from input sequence file ', trim(filename_seq(i))
+   !    call error_handler(E_MSG,'obs_sequence_tool',msgstring1)
+   !    cycle
+   ! else
+   !    process_file(i) = .true.
+   !    size_seq_in = remaining_obs_count
+   ! endif
 
    ! First sequence with valid data gets to set up the format of the output.
    ! This only matters if we keep the 'non-exact match of metadata' in the
    ! compare_metadata() subroutine below.
-   if ( first_seq < 0 ) then
-      first_seq = i
-      ! set up allowing number of copies or qcs to be changed or reordered.
-      if (edit_copies) then
-         ! do a tiny bit of sanity checking here.
-         do j = 1, copy_index_len
-            if ((new_copy_index(j) > num_copies_in) .or. &
-                (new_copy_index(j) < 0)) then   ! was < 1 here and below
-               write(msgstring1,*)'new_copy_index values must be between 0 and ', num_copies_in
-               call error_handler(E_ERR,'obs_sequence_tool', msgstring1, source)
-
-            endif
-         enddo
-         if (copy_index_len > num_copies_in) then
-            write(msgstring1,*)'WARNING: more output copies than input; some are being replicated'
-            call error_handler(E_MSG,'obs_sequence_tool', msgstring1)
-         endif
-         num_copies_out = copy_index_len
-      else
-         num_copies_out = num_copies_in
-         do j = 1, num_copies_in
-            new_copy_index(j) = j
-         enddo
-      endif
-      if (edit_qcs) then
-         do j = 1, qc_index_len
-            if ((new_qc_index(j) > num_qc_in) .or. &
-                (new_qc_index(j) < 0)) then  ! was < 1 here and below
-               write(msgstring1,*)'new_qc_index values must be between 0 and ', num_qc_in
-               call error_handler(E_ERR,'obs_sequence_tool', msgstring1, source)
-
-            endif
-         enddo
-         if (qc_index_len > num_qc_in) then
-            write(msgstring1,*)'WARNING: more output qcs than input; some are being replicated'
-            call error_handler(E_MSG,'obs_sequence_tool', msgstring1)
-         endif
-         num_qc_out = qc_index_len
-      else
-         num_qc_out = num_qc_in
-         do j = 1, num_qc_in
-            new_qc_index(j) = j
-         enddo
-      endif
-      size_seq_out = size_seq_in
-   else
-      size_seq_out = size_seq_out + size_seq_in
-   endif
-
-enddo
+!    if ( first_seq < 0 ) then
+!       first_seq = i
+!       ! set up allowing number of copies or qcs to be changed or reordered.
+!       if (edit_copies) then
+!          ! do a tiny bit of sanity checking here.
+!          do j = 1, copy_index_len
+!             if ((new_copy_index(j) > num_copies_in) .or. &
+!                 (new_copy_index(j) < 0)) then   ! was < 1 here and below
+!                write(msgstring1,*)'new_copy_index values must be between 0 and ', num_copies_in
+!                call error_handler(E_ERR,'obs_sequence_tool', msgstring1, source)
+!
+!             endif
+!          enddo
+!          if (copy_index_len > num_copies_in) then
+!             write(msgstring1,*)'WARNING: more output copies than input; some are being replicated'
+!             call error_handler(E_MSG,'obs_sequence_tool', msgstring1)
+!          endif
+!          num_copies_out = copy_index_len
+!       else
+!          num_copies_out = num_copies_in
+!          do j = 1, num_copies_in
+!             new_copy_index(j) = j
+!          enddo
+!       endif
+!       if (edit_qcs) then
+!          do j = 1, qc_index_len
+!             if ((new_qc_index(j) > num_qc_in) .or. &
+!                 (new_qc_index(j) < 0)) then  ! was < 1 here and below
+!                write(msgstring1,*)'new_qc_index values must be between 0 and ', num_qc_in
+!                call error_handler(E_ERR,'obs_sequence_tool', msgstring1, source)
+!
+!             endif
+!          enddo
+!          if (qc_index_len > num_qc_in) then
+!             write(msgstring1,*)'WARNING: more output qcs than input; some are being replicated'
+!             call error_handler(E_MSG,'obs_sequence_tool', msgstring1)
+!          endif
+!          num_qc_out = qc_index_len
+!       else
+!          num_qc_out = num_qc_in
+!          do j = 1, num_qc_in
+!             new_qc_index(j) = j
+!          enddo
+!       endif
+!       size_seq_out = size_seq_in
+!    else
+!       size_seq_out = size_seq_out + size_seq_in
+!    endif
+!
+! enddo
 
 ! no valid obs found?  if the index value is still negative, we are
 ! still waiting to process the first one and never found one.
