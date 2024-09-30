@@ -341,14 +341,14 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     endif
 
     ! setup our datatypes
-    ! call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
+    call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
 
     ! convert to sendable datatype
     ! also create mpi window of observation memory
     if (dist_type == 1) then
         call convert_obs_set(buffer, odt%obs_buf, odt%val_buf, num_vals_per_obs, num_alloc)
 
-        call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
+        ! call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
 
         ! create windows
         call mpi_win_create(odt%obs_buf, num_alloc * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
@@ -602,7 +602,7 @@ subroutine samplesort_obs(perc)
         call qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
         do i = 1, odt%nprocs - 1
             scnd_selection(i) = all_samples(i * per_proc)
-            print *, scnd_selection(i)
+            ! print *, scnd_selection(i)
         enddo
     endif
 
@@ -674,6 +674,8 @@ subroutine samplesort_obs(perc)
                 do while (j + k <= odt%nprocs .and. m == 0) 
                     if (j + k == odt%nprocs .and. bucket_cnt(j + k) == 0) then
                         k = k + 1
+                    ! else if (j + k == odt%nprocs) then
+                    !     m = 1
                     else if (bucket_cnt(j + k) == 0 .and. scnd_selection(j+k) == scnd_selection(i-1)) then
                         k = k + 1
                     else 
@@ -682,12 +684,12 @@ subroutine samplesort_obs(perc)
                 enddo
                 k = k + 1
                 iden_vals = bucket_cnt(i - 1) / k
-                if (odt%my_pe == 0) then
-                    print *, 'iden_vals: ', iden_vals
-                    print *, 'i:',  i
-                    print *, 'k: ', k
-                    print *, 'bucket_cnt: ', bucket_cnt(i - 1)
-                endif
+                ! if (odt%my_pe == 0) then
+                !     print *, 'iden_vals: ', iden_vals
+                !     print *, 'i:',  i
+                !     print *, 'k: ', k
+                !     print *, 'bucket_cnt: ', bucket_cnt(i - 1)
+                ! endif
                 iden_rem = modulo(bucket_cnt(i - 1), k)
                 l = 0
                 do while (l < k)
@@ -771,12 +773,12 @@ subroutine samplesort_obs(perc)
     call mpi_reduce(new_obs_num, sum, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, odt%ierror)
     if (odt%my_pe == 0) print *, 'sum: ', sum
 
-    do i = 0, odt%nprocs - 1
-        if (odt%my_pe == i) then
-            print *, 'odt%my_pe: ', i, ', new_obs_num: ', new_obs_num
-        endif
-        call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-    enddo
+    ! do i = 0, odt%nprocs - 1
+    !     if (odt%my_pe == i) then
+    !         print *, 'odt%my_pe: ', i, ', new_obs_num: ', new_obs_num
+    !     endif
+    !     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! enddo
 
     new_disp(1) = 0
     do i = 2, odt%nprocs
@@ -860,7 +862,6 @@ subroutine samplesort_obs(perc)
     ! (same as the buckets)
     odt%indicator => scnd_selection
 
-    call dbg_print('made it to the end')
     ! if (odt%my_pe == 0) then
     !     call print_obs_send(new_obs_set(1))
     ! endif
@@ -869,6 +870,7 @@ subroutine samplesort_obs(perc)
     ! endif
 
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    call dbg_print('made it to the end')
     ! 1. select set of samples from every process's observation sequences
     !    (1% of the total observation sequence)
     ! 2. every process sends its sample set to first process

@@ -1495,13 +1495,13 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, re
 ! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
-call samplesort_obs(1)
-call mpi_barrier(MPI_COMM_WORLD, ierror)
-if (odt%test_mode) then
-    call samplesort_test()
-endif
-call destroy_obs_window()
-return
+! call samplesort_obs(1)
+! call mpi_barrier(MPI_COMM_WORLD, ierror)
+! if (odt%test_mode) then
+!     call samplesort_test()
+! endif
+! call destroy_obs_window()
+! return
 
 ! if (odt%my_pe == 0) print *, 'dist_type = ', dist_type
 if (dist_type == 0) then
@@ -1509,6 +1509,7 @@ if (dist_type == 0) then
 else
     deallocate(buffer)
 endif
+return
 
 ! endif
 

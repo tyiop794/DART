@@ -120,7 +120,7 @@ endif
 ! ONLY ADD SPACE ON TASK 0.  everyone else just read in the original obs_seq file.
 
 stime = mpi_wtime()
-call read_obs_seq(file_in, copies_num_inc, qc_num_inc, 0, seq, 1)
+call read_obs_seq(file_in, copies_num_inc, qc_num_inc, 0, seq, 0)
 etime = mpi_wtime()
 if (my_task_id() == 0) print *, 'Total time: ', etime - stime
 
