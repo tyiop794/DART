@@ -67,7 +67,7 @@ integer :: iunit, io
 
 call initialize_mpi_utilities('test_obsseq_rw')
 
-do d = 1, 1 
+do d = 1, 10
 if (my_task_id() == 0) then
     print *, 'd = ', d
 endif
