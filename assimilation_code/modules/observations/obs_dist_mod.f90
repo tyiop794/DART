@@ -113,6 +113,10 @@ module obs_dist_mod
         ! 0: not testing
         ! 1: testing
         integer                                 :: test_mode
+
+        ! 1 to turn on, 0 to turn off
+        integer                                 :: dbg_print
+
         integer                                 :: ierror
     end type obs_dist_type
     type(obs_dist_type) :: odt
@@ -219,10 +223,10 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
 
     if (my_task_id() == root) then 
         ! sort observations in linked list traversal order using quicksort
-        print *, 'after gather'
+        ! print *, 'after gather'
         ! call print_obs_send(all_conv_set(554841856))
         call sort_obs_send_by_time(all_conv_set, all_values_qc, num_values, num_obs)
-        print *, 'sorted by time (timestamp added)'
+        ! print *, 'sorted by time (timestamp added)'
         ! call sort_roundrobin_inplace(all_conv_set, all_values_qc, num_obs, num_values, nprocs)
         ! print *, 'sorted with roundrobin dist'
     endif
@@ -300,7 +304,8 @@ integer function get_obs_offset(key)
 end function get_obs_offset
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc, dist_type, nprocs, test_mode)
+subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, total_obs, rem, num_alloc, dist_type, nprocs, &
+        test_mode, dbg_prt)
     ! this will initialize the obs window for one-sided communication
     ! or distributed communication generally
     type(obs_type),          intent(inout)      :: buffer(:)
@@ -309,6 +314,7 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     integer,                 intent(in)         :: rem
     integer,                 intent(in)         :: num_alloc
     integer,                 intent(in)         :: dist_type
+    integer,                 intent(in)         :: dbg_prt
     integer,                 intent(in)         :: nprocs
     integer                                     :: ierror
     integer                                     :: num_vals
@@ -333,6 +339,7 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     odt%mpi_time = 0.0
     odt%dist_type = dist_type
     odt%test_mode = test_mode
+    odt%dbg_print = dbg_prt
 
     ! set the number of obs associated with our process specifically
     odt%our_num_obs = odt%num_obs_per_proc
@@ -435,7 +442,8 @@ end subroutine get_obs_dist
 !------------------------------------------------------------------
 subroutine dbg_print(str)
     character(len=*),   intent(in)      :: str
-    if (odt%my_pe == 0) print *, str
+    ! only print if debugging print statements are enabled
+    if (odt%my_pe == 0 .and. odt%dbg_print) print *, str
 end subroutine dbg_print
 !------------------------------------------------------------------
 !------------------------------------------------------------------
@@ -492,7 +500,7 @@ subroutine samplesort_obs(perc)
     allocate(is_selected(our_num_obs))
     is_selected(1:our_num_obs) = 0
 
-    if (odt%my_pe == 0) print *, 'allocating memory for samples'
+   ! if (odt%my_pe == 0) print *, 'allocating memory for samples'
 
     all_sample_num = our_sample_num * odt%nprocs
     if (odt%my_pe == 0) then
@@ -501,7 +509,7 @@ subroutine samplesort_obs(perc)
         allocate(all_samples(1))
     endif
 
-    if (odt%my_pe == 0) print *, 'randomly selecting obs'
+    ! if (odt%my_pe == 0) print *, 'randomly selecting obs'
     sample_cnt = 0
     do while (sample_cnt < our_sample_num)
         call random_number(start_random) ! random enough? assume yes for now (until everything explodes)
@@ -543,7 +551,7 @@ subroutine samplesort_obs(perc)
     endif
 
     ! would this even work?! this is so cursed...
-    if (odt%my_pe == 0) print *, 'sorting observations in time order'
+    ! if (odt%my_pe == 0) print *, 'sorting observations in time order'
     ! call qsort(c_loc(obs_set_sort(1)), int(odt%our_num_obs, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
 
     ! qsort but just the unpacked obs (i have an idea)
@@ -645,7 +653,7 @@ subroutine samplesort_obs(perc)
         enddo
         bucket_cnt(i) = j
     enddo
-    if (odt%my_pe == 1) print *, 'last bucket_cnt: ', bucket_cnt(odt%nprocs)
+    ! if (odt%my_pe == 1) print *, 'last bucket_cnt: ', bucket_cnt(odt%nprocs)
 
     
     ! print *, odt%my_pe, 'reached barrier'
@@ -770,8 +778,8 @@ subroutine samplesort_obs(perc)
         new_obs_num = new_obs_num + new_cnt(i)
     enddo
 
-    call mpi_reduce(new_obs_num, sum, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, odt%ierror)
-    if (odt%my_pe == 0) print *, 'sum: ', sum
+    ! call mpi_reduce(new_obs_num, sum, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, odt%ierror)
+    ! if (odt%my_pe == 0) print *, 'sum: ', sum
 
     ! do i = 0, odt%nprocs - 1
     !     if (odt%my_pe == i) then
@@ -1288,8 +1296,8 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     integer(C_SIZE_T)                                       :: num_obs_c, total_vals_c, sizeof_val, sizeof_obs
     ! integer                                                 :: test(4), test_2(4), 
 
-    print *, 'odt%total_obs: ', odt%total_obs
-    print *, 'odt%rem: ', odt%rem
+    ! print *, 'odt%total_obs: ', odt%total_obs
+    ! print *, 'odt%rem: ', odt%rem
     i = 1
     j = 1
     k = 1
@@ -1300,7 +1308,7 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
         ! if (modulo(i, 10000) == 0) print *, 'i = ', i
         l = get_obs_offset(i)
         if (i /= obs_set(l)%key .and. start == 0) then
-            print *, 'i = ', i, 'key = ', obs_set(l)%key
+            ! print *, 'i = ', i, 'key = ', obs_set(l)%key
             start = 1
         endif
 
@@ -1321,15 +1329,15 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
         ! if (i == 16777217) print *, 'i (l = 16777217): ', i
         j = j + 1
     enddo
-    print *, 'l : ', l
-    print *, 'j: ', j
-    call print_obs_send(obs_set(l))
+    ! print *, 'l : ', l
+    ! print *, 'j: ', j
+    ! call print_obs_send(obs_set(l))
 
     start = 0
     do i = 1, odt%total_obs
         if (obs_set(i)%time_order == 0 .and. start == 0) then
-            print *, 'key: ', obs_set(i)%key
-            call print_obs_send(obs_set(i))
+            ! print *, 'key: ', obs_set(i)%key
+            ! call print_obs_send(obs_set(i))
             start = 1
         endif
     enddo
@@ -1338,7 +1346,7 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     !         print *, 'uh oh!'
     !     endif
     ! enddo
-    print *, 'Made it to qsort!'
+    ! print *, 'Made it to qsort!'
 
     total_values = num_obs * num_values
     total_vals_c = total_values
@@ -1346,9 +1354,9 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     sizeof_val = sizeof(values_qc(1))
     sizeof_obs = sizeof(obs_set(1))
 
-    print *, 'sort 1'
+    ! print *, 'sort 1'
     call qsort(c_loc(obs_set(1)), int(num_obs, c_size_t), sizeof_obs, c_funloc(compare_obs))
-    print *, 'sort 2'
+    ! print *, 'sort 2'
     call qsort(c_loc(values_qc(1)), int(num_obs, c_size_t), sizeof_val, c_funloc(compare_vals))
     
 

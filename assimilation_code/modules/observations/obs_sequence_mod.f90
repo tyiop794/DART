@@ -1276,7 +1276,7 @@ call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
 ! print *, '2'
 total_copies = num_copies
 total_obs = num_obs
-if (my_task_id() == 0) print *, 'total_obs: ', total_obs
+! if (my_task_id() == 0) print *, 'total_obs: ', total_obs
 root = 0
 
 ! Split by how much?
@@ -1380,9 +1380,9 @@ shifted_nprocs = mpi_num
 
 ! Get byte size of each obs
 call get_obs_size(file_id, obs_size, total_copies, init_pos)
-if (my_task_id() == 0) then
-    print *, 'obs_size: ', obs_size
-endif
+! if (my_task_id() == 0) then
+!     print *, 'obs_size: ', obs_size
+! endif
 
 ! Determine num obs per procs and starting obs
 ! total_obs = num_obs_per_proc * mpi_num
@@ -1403,9 +1403,9 @@ endif
 ! if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
 ! call allocate_obs_set(buffer, shifted_alloc, total_copies)
 ! call allocate_obs_set(buffer, num_alloc, total_copies)
-if (my_task_id() == 0) print *, 'starting allocation'
+! if (my_task_id() == 0) print *, 'starting allocation'
 call allocate_obs_set(buffer, num_alloc, total_copies)
-if (my_task_id() == 0) print *, 'finishing allocation'
+! if (my_task_id() == 0) print *, 'finishing allocation'
 ! print *, num_obs_per_proc
 ! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
 ! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
@@ -1487,8 +1487,8 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
 ! total_obs = num_obs_per_proc * mpi_num
 ! if (mpi_num > 1) then
-if (my_task_id() == 0) print *, 'Initializing obs window'
-call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type, mpi_num, 0) 
+! if (my_task_id() == 0) print *, 'Initializing obs window'
+call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type, mpi_num, 0, 0) 
 
 ! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
@@ -1501,6 +1501,7 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 !     call samplesort_test()
 ! endif
 ! call destroy_obs_window()
+! deallocate(buffer)
 ! return
 
 ! if (odt%my_pe == 0) print *, 'dist_type = ', dist_type
@@ -1509,6 +1510,9 @@ if (dist_type == 0) then
 else
     deallocate(buffer)
 endif
+call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! deallocate(buffer)
+call destroy_obs_window()
 return
 
 ! endif
@@ -1569,7 +1573,7 @@ if (my_task_id() < size .and. dist_type == 1) then
     !     ! endif
     ! enddo
 
-    print *, 'Total time (', total_obs, ' obs): ', etime - stime
+    ! print *, 'Total time (', total_obs, ' obs): ', etime - stime
     ! call mpi_win_unlock_all(odt%obs_win, ierror)
     ! call mpi_win_unlock_all(odt%val_win, ierror)
 endif

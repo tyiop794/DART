@@ -3,6 +3,7 @@ program test_obsseq_rw
 use mpi
 use        types_mod,  only : r8, missing_r8, metadatalength
 
+use obs_dist_mod
 use    utilities_mod,  only : register_module, initialize_utilities,        &
                               find_namelist_in_file, check_namelist_read,   &
                               error_handler, E_ERR, E_MSG, nmlfileunit,     &
@@ -31,9 +32,9 @@ use filter_mod,        only : get_blank_qc_index, get_obs_qc_index, get_obs_dart
 implicit none
 
 type(obs_sequence_type) :: seq
-integer                 :: num_copies_in, tnum_qc
+integer                 :: num_copies_in, tnum_qc, num_runs
 integer                 :: num_obs_in, max_num_obs
-real(r8)                :: stime, etime, ttime 
+real(r8)                :: stime, dtime, ttime, atime, etime
 integer                 :: file_id, d, ierror
 character(len=128)      :: read_format
 logical                 :: pre_I_format, cal
@@ -67,7 +68,13 @@ integer :: iunit, io
 
 call initialize_mpi_utilities('test_obsseq_rw')
 
-do d = 1, 10
+num_runs = 100
+dtime = 0.0
+ttime = 0.0
+atime = 0.0
+do d = 1, num_runs
+stime = mpi_wtime()
+! if (my_task_id() == 0) print *, 'stime: ', stime
 if (my_task_id() == 0) then
     print *, 'd = ', d
 endif
@@ -119,10 +126,10 @@ endif
 ! Read in with enough space for diagnostic output values and add'l qc field(s)
 ! ONLY ADD SPACE ON TASK 0.  everyone else just read in the original obs_seq file.
 
-stime = mpi_wtime()
+! stime = mpi_wtime()
 call read_obs_seq(file_in, copies_num_inc, qc_num_inc, 0, seq, 0)
-etime = mpi_wtime()
-if (my_task_id() == 0) print *, 'Total time: ', etime - stime
+! etime = mpi_wtime()
+! if (my_task_id() == 0) print *, 'Total time: ', etime - stime
 
 call filter_generate_copy_meta_data(seq, num_copies_in, &
         prior_obs_mean_index, posterior_obs_mean_index, &
@@ -169,8 +176,27 @@ call task_sync()
 
 call destroy_obs_sequence(seq)
 call mpi_barrier(MPI_COMM_WORLD, ierror)
+etime = mpi_wtime()
+if (my_task_id() == 0) print *, 'etime: ', etime
+dtime = etime - stime
+ttime = ttime + dtime
+
+if (my_task_id() == 0) then
+    ! TODO: add text to differentiate between models and nprocs
+    print *, 'Time for run ', d, ': ', dtime
+endif
+
+call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 enddo
+atime = ttime / num_runs
+
+if (my_task_id() == 0) then
+    ! TODO: add text to differentiate between models and nprocs
+    print *, 'Average time: (gather-sort-scatter with ', odt%nprocs, ' procs): ', atime
+endif
+
+call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! if (my_task_id() == 0) then
 !    call write_obs_seq(seq, file_out)
