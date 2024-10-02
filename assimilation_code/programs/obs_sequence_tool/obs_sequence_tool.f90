@@ -60,9 +60,19 @@ integer :: size_seq_in, num_copies_in, num_qc_in
 integer :: size_seq_out, num_copies_out, num_qc_out
 integer :: num_inserted, iunit, io, i, j, total_num_inserted
 integer :: max_num_obs, file_id, remaining_obs_count
-integer :: first_seq, cnt
+integer :: first_seq, cnt, all_obs, op_tmp, op_rem
+integer :: fpp_rem, fpp, file_no, file_cnt, fidx, scnd_idx
+integer :: curr_ofp
 integer, allocatable :: num_obs_per_proc(:)
-integer, allocatable :: num_obs_per_file(:)
+type(obs_sequence_type) :: foo
+integer, allocatable :: ofp(:)
+integer, allocatable :: ofp_buf(:)
+integer, allocatable :: has_add_file(:)
+integer, allocatable :: files_per_proc(:)
+type(obs_type_send), pointer :: obs_buf(:) => NULL()
+type(obs_values_qc_type), pointer :: val_buf(:) => NULL()
+type(obs_type_send), pointer :: curr_ptr(:) => NULL()
+type(obs_values_qc_type), pointer curr_ptr_val(:) => NULL()
 integer, allocatable :: obs_per_file_per_proc(:)
 character(len=metadatalength) :: read_format, meta_data
 logical :: pre_I_format, all_gone
@@ -446,9 +456,32 @@ allocate(num_obs_per_file(num_input_files))
 allocate(gi%recvcount(odt%nprocs))
 allocate(gi%recvdisps(odt%nprocs))
 ! note: num_input_files / odt%my_pe may be 0; handle this case!
-allocate(obs_per_file_per_proc(num_input_files / odt%my_pe))
+
+! note 2: every process has access to both variables listed
+! no need to communicate to other processes
+fpp = num_input_files / odt%my_pe
+fpp_rem = modulo(num_input_files, odt%my_pe)
+
+
+if (fpp > 0) then 
+    allocate(obs_per_file_per_proc(fpp))
+else
+    allocate(obs_per_file_per_proc(1))
+endif
+allocate(files_per_proc(odt%nprocs))
+
+! Calculate num of files read per proc
+do i = 0, odt%nprocs - 1
+    files_per_proc(i + 1) = fpp
+    if (i < fpp_rem) then
+        files_per_proc(i + 1) = files_per_proc(i + 1) + 1
+    endif
+enddo
+
+
 first_seq = -1
 cnt = 1
+file_cnt = files_per_proc(odt%my_pe)
 do i = 1, num_input_files
 
    if ( len(filename_seq(i)) .eq. 0 .or. filename_seq(i) .eq. "" ) then
@@ -456,8 +489,8 @@ do i = 1, num_input_files
          'num_input_files and filename_seq mismatch',source)
    endif
 
-   ! If we are designated reader for an obs file, then read 
-   if (modulo(i, odt%nprocs) == 0) then 
+   ! If we are designated reader for an obs file, then read header
+   if (modulo(i, odt%nprocs) == 0 .and. file_cnt > 0) then 
        call read_obs_seq_header(filename_seq(i), num_copies_in, num_qc_in, &
           size_seq_in, max_num_obs, file_id, read_format, pre_I_format, &
           close_the_file = .true.)
@@ -466,6 +499,7 @@ do i = 1, num_input_files
         ! store this value in array 
         obs_per_file_per_proc(cnt) = size_seq_in
         cnt = cnt + 1
+        file_cnt = file_cnt - 1
     endif
 enddo
 
@@ -473,17 +507,108 @@ enddo
 gi%sendcnt = cnt
 
 call mpi_gather(gi%sendcnt, 1, MPI_INTEGER, gi%recvcount, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, odt%ierror)
-call mpi_gatherv(obs_per_file_per_proc, gi%sendcnt, MPI_INTEGER, gi%recvcount, gi%recvdisps, MPI_INTEGER, & 
+
+! allocate(has_add_file(odt%nprocs))
+! do i = 1, odt%nprocs
+!     if (gi%recvcount(i) > 1) then
+!         has_add_file(i) = 1
+!     else
+!         has_add_file(i) = 0
+!     endif
+! enddo
+!
+! call mpi_bcast(has_add_file, odt%nprocs, MPI_INTEGER, 0, MPI_COMM_WORLD, odt%ierror)
+
+! todo: need to calculate gi%recvdisps using gi%recvcount
+gi%recvdisps(1) = 0
+do i = 2, odt%nprocs
+    gi%recvdisps(i) = gi%recvdisps(i-1) + gi%recvcount(i-1)
+enddo
+
+! send obs_per_file_per_proc to gi%recvcount
+call mpi_gatherv(obs_per_file_per_proc, gi%sendcnt, MPI_INTEGER, num_obs_per_file, gi%recvcount, gi%recvdisps, MPI_INTEGER, & 
     0, MPI_COMM_WORLD, odt%ierror)
 call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
-    
+! allocate num_obs_per_proc
+! allocate(num_obs_per_proc(odt%nprocs))
+! ofp = obs per file per proc
+allocate(ofp(num_input_files))
+allocate(ofp_buf(num_input_files))
+allocate(has_rem(odt%nprocs))
+
+! determine the total num of obs that we're merging
+if (odt%my_pe == 0) then
+    all_obs = 0
+    do i = 1, num_input_files
+        all_obs = all_obs + num_obs_per_file(i)
+    enddo
 
 
+    ! determine how many obs are going to each process
+    do i = 0, odt%nprocs - 1
+        do j = 1, num_input_files
+            op_tmp = num_obs_per_file(j) / odt%nprocs
+            op_rem = modulo(num_obs_per_file(j), odt%nprocs)
+            ofp_buf(j) = op_tmp
+            if (i < op_rem) then
+                ofp_buf(j) = ofp_buf(j) + 1
+            endif
+            ! ofp(j) = 
+        enddo
+        if (i == 0) then
+            print *, 'we can copy directly'
+            ofp = ofp_buf
+        else
+            call mpi_send(ofp_buf, num_input_files, MPI_INTEGER, i, MPI_ANY_TAG, MPI_COMM_WORLD, odt%ierror)
+        endif
+    enddo
+else
+    call mpi_recv(ofp, num_input_files, MPI_INTEGER, 0, MPI_ANY_TAG, MPI_COMM_WORLD, odt%ierror)
+endif
+
+call MPI_barrier(MPI_COMM_WORLD, odt%ierror)
+
+! ofp indices link to same file as num_obs_per_file
+! worth keeping in mind
+! idx in ofp = (fpp * 2) + proc
+! double loop to move through list
+! move through each file associated with each file
+! can use this to calculate which files are associated with which indices
+
+! note: I phased num_obs_per_proc out
+! Please update!!!
+allocate(obs_buf(num_obs_per_proc(odt%my_pe)))
+allocate(val_buf(num_obs_per_proc(odt%my_pe)*num_copies_in))
+
+! wait until both buffers are allocated
+call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
+! next: read in each file
+! when we move to next file, move pointer as well
+scnd_idx = 1 ! idx of ofp
+do i = 0, odt%nprocs - 1
+    do j = 1, files_per_proc(i)
+        fidx = (odt%nprocs * (j-1)) + (i + 1)
+        curr_ofp = ofp(scnd_idx)
+        curr_ofp_val = ofp(scnd_idx) * num_copies_in
+        ! note: need to perform arithmetic to determine correct location of pointer (as if this wasn't already a messy nightmare)
+        odt%obs_buf => obs_buf(1:curr_ofp)
+        odt%val_buf => val_buf(1:curr_ofp_val)
+        ! note: need to send curr_ptr to read_obs_seq somehow
+        ! maybe create helper function?
+        ! or do .... something?
+        
+        call read_obs_seq(filename_seq(fidx), 0, 0, 0, foo, 1)
+        
+        ! filename_seq(fidx)
+        scnd_idx = scnd_idx + 1
+    enddo
+enddo
 
    
   ! for the time being, let's not trim the files; another can of worms to not open
-  ! also, under this system, we'll have enough memory to store all obs
+  ! also, under this system, we'll (ideally) have enough memory to store all obs
    ! call read_obs_seq(filename_seq(i), 0, 0, 0, seq_in)
    ! call trim_seq(seq_in, trim_first, first_obs_time, trim_last, last_obs_time, &
    !               filename_seq(i), .true., remaining_obs_count)

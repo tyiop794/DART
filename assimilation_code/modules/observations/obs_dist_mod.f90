@@ -317,8 +317,12 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
     ! allocate our buffers to be number of obs on this process
     num_vals = num_obs_per_proc * num_vals_per_obs
     if (dist_type == 1) then
-        allocate(odt%obs_buf(num_alloc))
-        allocate(odt%val_buf(num_alloc*num_vals_per_obs))
+        if (.not. associated(odt%obs_buf)) then
+            allocate(odt%obs_buf(num_alloc))
+        endif
+        if (.not. associated(odt%val_buf)) then
+            allocate(odt%val_buf(num_alloc*num_vals_per_obs))
+        endif
     endif
 
     ! set important variables related to observation distribution
