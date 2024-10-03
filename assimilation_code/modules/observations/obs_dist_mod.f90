@@ -93,6 +93,7 @@ module obs_dist_mod
         type(obs_values_qc_type), pointer   :: val_buf(:) => NULL()
         type(obs_type_send), pointer        :: obs_buf(:) => NULL()
         integer(i8), pointer                :: indicator(:) => NULL()
+        integer, pointer                    :: var_obs_per_proc(:) => NULL()
         ! real(r8), pointer                       :: obs_reals(:) => NULL()
         integer                                 :: obs_mpi
         integer                                 :: val_mpi
@@ -477,10 +478,10 @@ subroutine samplesort_obs(perc)
     integer(i8)                         :: curr_time
     integer                             :: iden_vals, iden_rem
 
-    our_num_obs = odt%num_obs_per_proc
-    if (odt%my_pe < odt%rem) then
-        our_num_obs = our_num_obs + 1
-    endif
+    our_num_obs = odt%our_num_obs
+    ! if (odt%my_pe < odt%rem) then
+    !     our_num_obs = our_num_obs + 1
+    ! endif
 
 
     ! number of samples to retrieve / send to first process
@@ -865,6 +866,11 @@ subroutine samplesort_obs(perc)
     ! used to indicate which processes hold which obs time ranges
     ! (same as the buckets)
     odt%indicator => scnd_selection
+
+    ! how many obs does each process have?
+    allocate(odt%var_obs_per_proc(odt%nprocs))
+    call mpi_allgather(new_obs_num, 1, MPI_INTEGER, odt%var_obs_per_proc, 1, MPI_INTEGER, MPI_COMM_WORLD, odt%ierror)
+    ! odt%var_obs_per_proc => new_cnt
 
     ! if (odt%my_pe == 0) then
     !     call print_obs_send(new_obs_set(1))

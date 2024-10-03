@@ -11,6 +11,7 @@ program obs_sequence_tool
 use        types_mod, only : r8, missing_r8, metadatalength, obstypelength, &
                              MISSING_I
 use mpi
+use mpi_utilities_mod, only : task_count, my_task_id
 
 use    utilities_mod, only : finalize_utilities, initialize_utilities, &
                              find_namelist_in_file, check_namelist_read, &
@@ -62,10 +63,14 @@ integer :: num_inserted, iunit, io, i, j, total_num_inserted
 integer :: max_num_obs, file_id, remaining_obs_count
 integer :: first_seq, cnt, all_obs, op_tmp, op_rem
 integer :: fpp_rem, fpp, file_no, file_cnt, fidx, scnd_idx
-integer :: curr_ofp
+integer :: curr_ofp, start_idx, end_idx, start_val_idx, end_val_idx
+integer :: total_obs_on_proc, total_obs
+integer :: ofp_tmp, ofp_rem, curr_key, writers
+integer :: obs_per_writer, obs_write_buf(:), val_write_buf(:), our_writer_obs, pe_on_node
+integer :: writers_per_node
 integer, allocatable :: num_obs_per_proc(:)
 type(obs_sequence_type) :: foo
-integer, allocatable :: ofp(:)
+integer, pointer :: ofp(:) => NULL()
 integer, allocatable :: ofp_buf(:)
 integer, allocatable :: has_add_file(:)
 integer, allocatable :: files_per_proc(:)
@@ -452,6 +457,8 @@ size_seq_out     = 0
 ! into array allocated size num_input_files
 ! calculate num obs per proc on process 0 (easier to perform)
 ! broadcast information to all processes
+odt%my_pe = my_task_id()
+odt%nprocs = task_count() 
 allocate(num_obs_per_file(num_input_files))
 allocate(gi%recvcount(odt%nprocs))
 allocate(gi%recvdisps(odt%nprocs))
@@ -464,7 +471,11 @@ fpp_rem = modulo(num_input_files, odt%my_pe)
 
 
 if (fpp > 0) then 
-    allocate(obs_per_file_per_proc(fpp))
+    if (odt%my_pe < fpp_rem) then
+        allocate(obs_per_file_per_proc(fpp + 1))
+    else
+        allocate(obs_per_file_per_proc(fpp))
+    endif
 else
     allocate(obs_per_file_per_proc(1))
 endif
@@ -503,6 +514,10 @@ do i = 1, num_input_files
     endif
 enddo
 
+! assume (for now) that each obs has the same num of values
+! (I think this is the only case where merging obs makes sense anyways; and the only case that obs_seq_tool handles)
+call mpi_bcast(num_copies_in, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, odt%ierror)
+
 ! this is already getting messy....
 gi%sendcnt = cnt
 
@@ -533,41 +548,72 @@ call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 ! allocate num_obs_per_proc
 ! allocate(num_obs_per_proc(odt%nprocs))
 ! ofp = obs per file per proc
-allocate(ofp(num_input_files))
-allocate(ofp_buf(num_input_files))
-allocate(has_rem(odt%nprocs))
+! allocate(ofp(num_input_files))
+! allocate(ofp_buf(num_input_files))
+! allocate(has_rem(odt%nprocs))
+
+! okay...let's try something simpler
+! we're doing a lot of sends and recvs down below...
+! why not use one collective instead?
+call mpi_bcast(num_obs_per_file, num_input_files, MPI_INTEGER, 0, MPI_COMM_WORLD, odt%ierror)
+
+
+! perform simple arithmetic to determine whether we have a remainder for each file
+do i = 1, num_input_files
+    ofp_tmp = num_obs_per_file(i) / odt%nprocs
+    ofp_rem = modulo(num_obs_per_file(i), odt%nprocs)
+    num_obs_per_file(i) = ofp_tmp
+    if (odt%my_pe < ofp_rem) then
+        num_obs_per_file(i) = num_obs_per_file(i) + 1
+    endif
+enddo
+
+! pointer to already allocated buffer = less memory used
+! it's small but can't hurt :)
+ofp => num_obs_per_file
+call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
 ! determine the total num of obs that we're merging
-if (odt%my_pe == 0) then
-    all_obs = 0
-    do i = 1, num_input_files
-        all_obs = all_obs + num_obs_per_file(i)
-    enddo
+! if (odt%my_pe == 0) then
+!     all_obs = 0
+!     do i = 1, num_input_files
+!         all_obs = all_obs + num_obs_per_file(i)
+!     enddo
+!
+!
+!     ! determine how many obs are going to each process
+!     do i = 0, odt%nprocs - 1
+!         do j = 1, num_input_files
+!             op_tmp = num_obs_per_file(j) / odt%nprocs
+!             op_rem = modulo(num_obs_per_file(j), odt%nprocs)
+!             ofp_buf(j) = op_tmp
+!             if (i < op_rem) then
+!                 ofp_buf(j) = ofp_buf(j) + 1
+!             endif
+!             ! ofp(j) = 
+!         enddo
+!         if (i == 0) then
+!             print *, 'we can copy directly'
+!             ofp = ofp_buf
+!         else
+!             call mpi_send(ofp_buf, num_input_files, MPI_INTEGER, i, MPI_ANY_TAG, MPI_COMM_WORLD, odt%ierror)
+!         endif
+!     enddo
+! else
+!     call mpi_recv(ofp, num_input_files, MPI_INTEGER, 0, MPI_ANY_TAG, MPI_COMM_WORLD, odt%ierror)
+! endif
 
+! add the total num of observations we would have 
+total_obs_on_proc = 0
+do i = 1, num_input_files
+    total_obs_on_proc = total_obs_on_proc + ofp(i)
+enddo
 
-    ! determine how many obs are going to each process
-    do i = 0, odt%nprocs - 1
-        do j = 1, num_input_files
-            op_tmp = num_obs_per_file(j) / odt%nprocs
-            op_rem = modulo(num_obs_per_file(j), odt%nprocs)
-            ofp_buf(j) = op_tmp
-            if (i < op_rem) then
-                ofp_buf(j) = ofp_buf(j) + 1
-            endif
-            ! ofp(j) = 
-        enddo
-        if (i == 0) then
-            print *, 'we can copy directly'
-            ofp = ofp_buf
-        else
-            call mpi_send(ofp_buf, num_input_files, MPI_INTEGER, i, MPI_ANY_TAG, MPI_COMM_WORLD, odt%ierror)
-        endif
-    enddo
-else
-    call mpi_recv(ofp, num_input_files, MPI_INTEGER, 0, MPI_ANY_TAG, MPI_COMM_WORLD, odt%ierror)
-endif
+! calculate the total number of observations
+! and save to all processes using allreduce
+call mpi_allreduce(MPI_IN_PLACE, total_obs, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, odt%ierror)
 
-call MPI_barrier(MPI_COMM_WORLD, odt%ierror)
+! call MPI_barrier(MPI_COMM_WORLD, odt%ierror)
 
 ! ofp indices link to same file as num_obs_per_file
 ! worth keeping in mind
@@ -578,8 +624,8 @@ call MPI_barrier(MPI_COMM_WORLD, odt%ierror)
 
 ! note: I phased num_obs_per_proc out
 ! Please update!!!
-allocate(obs_buf(num_obs_per_proc(odt%my_pe)))
-allocate(val_buf(num_obs_per_proc(odt%my_pe)*num_copies_in))
+allocate(obs_buf(total_obs_on_proc))
+allocate(val_buf(total_obs_on_proc*num_copies_in))
 
 ! wait until both buffers are allocated
 call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
@@ -587,26 +633,121 @@ call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 ! next: read in each file
 ! when we move to next file, move pointer as well
 scnd_idx = 1 ! idx of ofp
+start_idx = 1
+end_idx = 1
+start_val_idx = 1
+end_val_idx = 1
 do i = 0, odt%nprocs - 1
     do j = 1, files_per_proc(i)
         fidx = (odt%nprocs * (j-1)) + (i + 1)
         curr_ofp = ofp(scnd_idx)
+        end_idx = end_idx + curr_ofp - 1
         curr_ofp_val = ofp(scnd_idx) * num_copies_in
+        end_val_idx = end_val_idx + curr_ofp_val - 1
         ! note: need to perform arithmetic to determine correct location of pointer (as if this wasn't already a messy nightmare)
-        odt%obs_buf => obs_buf(1:curr_ofp)
-        odt%val_buf => val_buf(1:curr_ofp_val)
+        odt%obs_buf => obs_buf(start_idx:end_idx)
+        odt%val_buf => val_buf(start_val_idx:end_val_idx)
         ! note: need to send curr_ptr to read_obs_seq somehow
         ! maybe create helper function?
         ! or do .... something?
         
+        ! perform the read
+        ! serves as our vessel
         call read_obs_seq(filename_seq(fidx), 0, 0, 0, foo, 1)
         
         ! filename_seq(fidx)
         scnd_idx = scnd_idx + 1
+        start_idx = end_idx + 1
+        start_val_idx = end_val_idx + 1
     enddo
 enddo
 
+odt%obs_buf => obs_buf
+odt%val_buf => val_buf
+odt%our_num_obs = total_obs_on_proc
+odt%total_obs = total_obs
+odt%test_mode = 0
+
+! call samplesort on the observations stored in our buffers
+! note: need to verify what variables in odt are used by samplesort
+! update them so samplesort doesn't flip
+! note: maybe store the number of values in each observation rather than as a separate variable; we may have different types of obs
+! with different numbers of values
+call samplesort_obs(1)
+
+call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
+
+! -----------------end of part 1------------------- !
+! by this point, our observations should all be read and sorted
+! now we need to figure out how to write observations to single file
+! 
+! Steps:
+! 0). set keys and prev and next pointers to correct values
+! 1). Decide who the writers will be
+! 2). Move observations to their memory 
+! 3). determine where each process will be writing in the file
+! 4). write at this point in the file
+! 5). Profit!
+! this sounds easy (not)
+
+! odt%var_obs_per_proc: number of obs per process
+! odt%indicator: time range of particular process's observations
+
+! set our key, next_time and prev_time for our obs
+if (odt%my_pe == 0) then
+    start_idx = 0
+else
+    start_idx = odt%var_obs_per_proc(odt%my_pe - 1)
+endif
+do i = 1, odt%var_obs_per_proc(odt%my_pe)
+    curr_key = start_idx + i
+    odt%obs_buf(i)%key = curr_key
+    if (i == 1) then
+        odt%obs_buf(i)%prev_time = -1
+    else
+        odt%obs_buf(i)%prev_time = curr_key - 1
+    endif
+    if (i == odt%var_obs_per_proc(odt%my_pe) .and. odt%my_pe == odt%nprocs - 1) then
+        odt%obs_buf(i)%next_time = -1
+    else
+        odt%obs_buf(i)%next_time = curr_key + 1
+    endif
+enddo
    
+! Let's assign our writers
+! For now, let's cap our writers to 100
+if (odt%nprocs < 100) then
+    writers = odt%nprocs
+else
+    writers = 100
+endif
+obs_per_writer = odt%total_obs / writers
+our_writer_obs = obs_per_writer
+if (odt%my_pe < modulo(odt%total_obs, writers)) then
+    our_writer_obs = our_writer_obs + 1
+endif
+
+! do stuffs if we're a writer
+! todo: make a function that sets up the obs windows correctly
+! reset_obs_window or something like that
+
+! todo: find a way to get the number of processes per node
+if (writers == 100) then
+    ! assume (for now) that we're using all of the processes on each node, and that each node has 128 processes
+    writers_per_node = (writers / (odt%nprocs / 128))
+    pe_on_node = modulo(odt%my_pe, 128)
+
+    ! check if we're a writer
+    if (pe_on_node < writers_per_node) then
+        allocate(obs_write_buf(obs_per_writer))
+        allocate(val_write_buf(obs_per_writer*odt%num_vals_per_obs))
+    endif
+endif
+
+! other procs wait for writers to finish
+call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
   ! for the time being, let's not trim the files; another can of worms to not open
   ! also, under this system, we'll (ideally) have enough memory to store all obs
    ! call read_obs_seq(filename_seq(i), 0, 0, 0, seq_in)
