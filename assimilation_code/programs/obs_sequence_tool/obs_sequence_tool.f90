@@ -67,8 +67,8 @@ integer :: curr_ofp, start_idx, end_idx, start_val_idx, end_val_idx
 integer :: total_obs_on_proc, total_obs
 integer :: ofp_tmp, ofp_rem, curr_key, writers
 integer :: obs_per_writer, obs_write_buf(:), val_write_buf(:), our_writer_obs, pe_on_node
-integer :: writers_per_node
-integer, allocatable :: num_obs_per_proc(:)
+integer :: writers_per_node, writer_rem, bsindex 
+integer, allocatable :: num_obs_per_proc(:), checking_arr(:)
 type(obs_sequence_type) :: foo
 integer, pointer :: ofp(:) => NULL()
 integer, allocatable :: ofp_buf(:)
@@ -724,6 +724,7 @@ else
 endif
 obs_per_writer = odt%total_obs / writers
 our_writer_obs = obs_per_writer
+writer_rem = modulo(odt%total_obs, writers)
 if (odt%my_pe < modulo(odt%total_obs, writers)) then
     our_writer_obs = our_writer_obs + 1
 endif
@@ -731,6 +732,7 @@ endif
 ! do stuffs if we're a writer
 ! todo: make a function that sets up the obs windows correctly
 ! reset_obs_window or something like that
+call reset_obs_window()
 
 ! todo: find a way to get the number of processes per node
 if (writers == 100) then
@@ -740,8 +742,30 @@ if (writers == 100) then
 
     ! check if we're a writer
     if (pe_on_node < writers_per_node) then
-        allocate(obs_write_buf(obs_per_writer))
-        allocate(val_write_buf(obs_per_writer*odt%num_vals_per_obs))
+        allocate(obs_write_buf(our_writer_obs))
+        allocate(val_write_buf(our_writer_obs*odt%num_vals_per_obs))
+
+        ! need to figure out a few things
+        ! 1). from whom are we retrieving? and 
+        ! 2). how many elements are we retrieving?
+
+        ! part 1: find our starting obs and ending obs
+        if (odt%my_pe < writer_rem) then
+            start_idx = odt%my_pe * our_writer_obs
+        else
+            start_idx = ((our_writer_obs + 1) * writer_rem) + ((odt%my_pe - writer_rem) * our_writer_obs)
+        endif
+        allocate(checking_arr(odt%nprocs))
+        checking_arr(1) = odt%var_obs_per_proc(1)
+        do i = 2, odt%nprocs
+            checking_arr(i) = checking_arr(i - 1) + odt%var_obs_per_proc(i)
+        enddo
+
+        ! perform a binary search to find our starting place
+        bsindex = binsearch(start_idx, checking_arr, odt%nprocs)
+
+        ! now we look on the (bsindex) process
+        ! we need to calculate our indices
     endif
 endif
 

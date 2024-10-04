@@ -368,6 +368,23 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, tot
 end subroutine initialize_obs_window
 !------------------------------------------------------------------
 !------------------------------------------------------------------
+! Adjust obs window size based on new information regarding 
+! obs that we currently have
+subroutine reset_obs_window()
+    ! Clear our original windows
+    call mpi_win_free(odt%obs_win, ierror)
+    call mpi_win_free(odt%val_win, ierror)
+
+    ! Create new windows using new available information
+    call mpi_win_create(odt%obs_buf, odt%our_num_obs * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+        odt%obs_win, odt%ierror) 
+
+    call mpi_win_create(odt%val_buf, odt%num_vals_per_obs * odt%our_num_obs * sizeof(odt%val_buf(1)), &
+        sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+        odt%val_win, odt%ierror) 
+end subroutine reset_obs_window
+!------------------------------------------------------------------
+!------------------------------------------------------------------
 subroutine get_obs_loc_info(key, obs_pe, obs_offset, val_offset)
     integer,            intent(in)          :: key
     integer,            intent(inout)       :: obs_pe
@@ -445,6 +462,22 @@ end subroutine dbg_print
 !------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine samplesort_obs(perc)
+    ! Idea: use samplesort to sort observations into time order
+    ! best case: will provide a faster, more memory efficient sort
+    ! worst case: everything breaks (yay! fun!)
+    !
+    ! Steps:
+    ! 1. select set of samples from every process's observation sequences
+    !    (1% of the total observation sequence)
+    ! 2. every process sends its sample set to first process
+    ! 3. first process sorts samples using qsort
+    ! 4. first process selects p - 1 samples from this set
+    ! 5. p - 1 samples broadcasted to every process
+    ! 6. elements are placed into their respective buckets
+    ! 7. count and displacement sent using alltoall
+    ! 8. actual elements sent using alltoallv
+
+
     integer,            intent(in)      :: perc ! what percentage of obs sequence will be our sample?
 
     integer                             :: all_sample_num
@@ -881,20 +914,6 @@ subroutine samplesort_obs(perc)
 
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     call dbg_print('made it to the end')
-    ! 1. select set of samples from every process's observation sequences
-    !    (1% of the total observation sequence)
-    ! 2. every process sends its sample set to first process
-    ! 3. first process sorts samples using qsort
-    ! 4. first process selects p - 1 samples from this set
-    ! 5. p - 1 samples broadcasted to every process
-    ! 6. elements are placed into their respective buckets
-    ! 7. count and displacement sent using alltoall
-    ! 8. actual elements sent using alltoallv
-
-    ! Idea: use samplesort to sort observations into time order
-    ! best case: will provide a faster, more memory efficient sort
-    ! worst case: everything breaks (yay! fun!)
-
 end subroutine samplesort_obs
 !------------------------------------------------------------------
 !------------------------------------------------------------------
@@ -931,15 +950,21 @@ subroutine samplesort_test()
 end subroutine samplesort_test
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine get_all_obs_contiguous(obs)
+subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     ! What happens if we attempt to retrieve all contiguous observations in obs_sequence?
     ! rather than one get for each observation?
     ! maybe would reduce startup cost?
-    type(obs_type),         intent(inout)           :: obs(:)
+    ! this is definitely much faster
+    ! will have to perform at most nprocs - 1 gets rather than at most total_obs gets
+    ! nprocs - 1 is (usually) much smaller than total_obs
+    ! type(obs_type),         intent(inout)           :: obs(:)
+    integer,                intent(in)              :: start, end ! from which obs in odt%obs_buf are we starting and ending?
+    integer,                intent(in)              :: proc ! from where are we retrieving?
     ! integer,                intent(inout)           :: obs
-    type(obs_type_send),allocatable                 :: obs_buffer(:)
-    type(obs_values_qc_type),allocatable            :: vals_buffer(:)
+    type(obs_type_send),allocatable,intent(inout)   :: obs_buffer(:)
+    type(obs_values_qc_type),allocatable,intent(inout)  :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc, total_values
+    integer                                         :: start_val, end_val
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
     integer                                         :: ierror, i, d, get_cnt, num_retrieve, val_retrieve
     integer                                         :: scnd_num_retrieve
@@ -954,10 +979,10 @@ subroutine get_all_obs_contiguous(obs)
     ! todo: also determine whether the obs we are looking for is on another process
     ! if it is not, we do not need to perform a one-sided comm
 
-    ! lock window of all processes
-    stime = mpi_wtime()
-    call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%obs_win, ierror)
-    call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win, ierror)
+    ! lock window of target process
+    ! stime = mpi_wtime()
+    call mpi_win_lock(MPI_LOCK_SHARED, proc, MPI_MODE_NOCHECK, odt%obs_win, odt%ierror)
+    call mpi_win_lock(MPI_LOCK_SHARED, proc, MPI_MODE_NOCHECK, odt%val_win, odt%ierror)
 
 
     num_retrieve = 0
@@ -967,41 +992,40 @@ subroutine get_all_obs_contiguous(obs)
     val_offset = 0
 
     print *, 'odt%num_obs_per_proc: ', odt%num_obs_per_proc
-    print *, 'odt%nprocs: ', odt%nprocs
     scnd_num_retrieve = odt%num_obs_per_proc
     obs_pos = 1
     val_pos = 1
-    do i = 0, odt%nprocs - 1
-        ! print *, 'i: ', i
-        ! d = 3
-        scnd_num_retrieve = odt%num_obs_per_proc
-        scnd_val_retrieve = odt%num_obs_per_proc * odt%num_vals_per_obs
-        ! scnd_val_retrieve = 1
+    ! print *, 'i: ', i
+    ! d = 3
+    scnd_num_retrieve = (end - start) + 1
+    scnd_val_retrieve = scnd_num_retrieve * odt%num_vals_per_obs
+    start_val = ((start - 1) * odt%num_vals_per_obs) + 1
+    end_val = (end * odt%num_vals_per_obs)
+    ! scnd_val_retrieve = 1
 
-        if (i < odt%rem) then
-            scnd_num_retrieve = scnd_num_retrieve + 1
-            scnd_val_retrieve = scnd_val_retrieve + odt%num_vals_per_obs
-        endif
+    ! if (i < odt%rem) then
+    !     scnd_num_retrieve = scnd_num_retrieve + 1
+    !     scnd_val_retrieve = scnd_val_retrieve + odt%num_vals_per_obs
+    ! endif
 
-        if (i == odt%my_pe) then
-            obs_buffer(obs_pos:obs_pos+scnd_num_retrieve-1) = odt%obs_buf(1:scnd_num_retrieve)
-            vals_buffer(val_pos:val_pos+scnd_val_retrieve-1) = odt%val_buf(1:scnd_val_retrieve)
-        else
-            call mpi_get(obs_buffer(obs_pos:obs_pos+scnd_num_retrieve-1), scnd_num_retrieve, odt%obs_mpi, i, obs_offset, scnd_num_retrieve, odt%obs_mpi, odt%obs_win, ierror)
-            ! call mpi_get(vals_buffer(val_pos:val_pos+scnd_val_retrieve-1), scnd_val_retrieve, odt%val_mpi, i, 0, scnd_val_retrieve, &
-            !     odt%val_mpi, odt%val_win, ierror)
-            call mpi_get(vals_buffer(val_pos:val_pos+scnd_val_retrieve-1), scnd_val_retrieve, odt%val_mpi, i, val_offset, &
-            scnd_val_retrieve, odt%val_mpi, odt%val_win, ierror)
-        endif
+    ! obs_buffer(1:scnd_num_retrieve-1) = odt%obs_buf(start:end)
+    ! vals_buffer(1:scnd_val_retrieve-1) = odt%val_buf(1:scnd_val_retrieve)
+! else
+    obs_offset = start - 1
+    val_offset = start_val - 1
+    call mpi_get(obs_buffer(1:scnd_num_retrieve), scnd_num_retrieve, odt%obs_mpi, proc, obs_offset, scnd_num_retrieve, odt%obs_mpi, odt%obs_win, ierror)
+    ! call mpi_get(vals_buffer(val_pos:val_pos+scnd_val_retrieve-1), scnd_val_retrieve, odt%val_mpi, i, 0, scnd_val_retrieve, &
+    !     odt%val_mpi, odt%val_win, ierror)
+    call mpi_get(vals_buffer(1:val_pos+scnd_val_retrieve), scnd_val_retrieve, odt%val_mpi, proc, val_offset, &
+    scnd_val_retrieve, odt%val_mpi, odt%val_win, ierror)
 
-        obs_pos = obs_pos + scnd_num_retrieve
-        val_pos = val_pos + scnd_val_retrieve
-    enddo
+    obs_pos = obs_pos + scnd_num_retrieve
+    val_pos = val_pos + scnd_val_retrieve
 
     ! unlock window of all processes
-    call mpi_win_unlock_all(odt%obs_win, ierror)
-    call mpi_win_unlock_all(odt%val_win, ierror)
-    etime = mpi_wtime()
+    call mpi_win_unlock(proc, odt%obs_win, odt%ierror)
+    call mpi_win_unlock(proc, odt%val_win, odt%ierror)
+    ! etime = mpi_wtime()
 
     print *, 'finished get'
     print *, 'time to get: ', etime - stime
@@ -1013,8 +1037,40 @@ subroutine get_all_obs_contiguous(obs)
     deallocate(obs_buffer)
     deallocate(vals_buffer)
 
-end subroutine get_all_obs_contiguous
+end subroutine get_obs_contiguous
+!------------------------------------------------------------------
+!------------------------------------------------------------------
+! Perform a binary search on array of integers given a specific element. 
+! Need this for obs_sequence_tool
+function binsearch(elem, array, nelems)
+    integer,        intent(in)          :: elem, nelems
+    integer,        intent(in)          :: array(:)
 
+    integer                             :: middle, melem, prev_elem, start_idx, end_idx, actual_idx
+    middle = (nelems / 2) + 1
+    melem = array(middle)
+    prev_elem = array(middle - 1)
+    start_idx = 1
+    end_idx = nelems
+
+    ! really hope I wrote this correctly
+    do while ((elem > melem .or. elem <= prev_elem) .and. start_idx < end_idx)
+        if (elem > melem) then
+            ! check the right side of the list
+            start_idx = middle + 1
+        else 
+            ! check the left side of the list
+            end_idx = middle - 1
+        endif
+        middle = (((end_idx - start_idx) + 1) / 2) + 1
+        middle = (middle + start_idx) - 1
+        melem = array(middle)
+        prev_elem = array(middle - 1)
+    enddo
+
+    binsearch = middle
+
+end function binsearch
 !------------------------------------------------------------------
 !------------------------------------------------------------------
 subroutine get_obs_set(keys, obs, num_keys)
