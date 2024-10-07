@@ -67,7 +67,7 @@ integer :: curr_ofp, start_idx, end_idx, start_val_idx, end_val_idx
 integer :: total_obs_on_proc, total_obs
 integer :: ofp_tmp, ofp_rem, curr_key, writers
 integer :: obs_per_writer, obs_write_buf(:), val_write_buf(:), our_writer_obs, pe_on_node
-integer :: writers_per_node, writer_rem, bsindex 
+integer :: writers_per_node, writer_rem, startproc, endproc
 integer, allocatable :: num_obs_per_proc(:), checking_arr(:)
 type(obs_sequence_type) :: foo
 integer, pointer :: ofp(:) => NULL()
@@ -755,6 +755,7 @@ if (writers == 100) then
         else
             start_idx = ((our_writer_obs + 1) * writer_rem) + ((odt%my_pe - writer_rem) * our_writer_obs)
         endif
+        end_idx = start_idx + our_writer_obs - 1
         allocate(checking_arr(odt%nprocs))
         checking_arr(1) = odt%var_obs_per_proc(1)
         do i = 2, odt%nprocs
@@ -762,7 +763,9 @@ if (writers == 100) then
         enddo
 
         ! perform a binary search to find our starting place
-        bsindex = binsearch(start_idx, checking_arr, odt%nprocs)
+        ! bsindex: the process on which our starting index is located
+        startproc = binsearch(start_idx, checking_arr, odt%nprocs)
+        endproc = binsearch(end_idx, checking_arr, odt%nprocs)
 
         ! now we look on the (bsindex) process
         ! we need to calculate our indices
