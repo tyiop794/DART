@@ -979,7 +979,7 @@ subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     integer,                intent(in)              :: proc ! from where are we retrieving?
     ! integer,                intent(inout)           :: obs
     type(obs_type_send),allocatable,intent(inout)   :: obs_buffer(:)
-    type(obs_values_qc_type),allocatable,intent(inout)  :: vals_buffer(:)
+    type(sortable_real),allocatable,intent(inout)  :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc, total_values
     integer                                         :: start_val, end_val
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
@@ -990,7 +990,7 @@ subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     ! type(obs_type)                                  :: obs_arr(1)
 
     get_cnt = 0
-    total_values = odt%num_vals_per_obs * odt%total_obs
+    total_values = (odt%num_vals_per_obs + odt%num_qc_per_obs) * odt%total_obs
 
     ! Assume we're allocating these outside the function
     ! allocate(obs_buffer(odt%total_obs))
@@ -1017,9 +1017,9 @@ subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     ! print *, 'i: ', i
     ! d = 3
     scnd_num_retrieve = (end - start) + 1
-    scnd_val_retrieve = scnd_num_retrieve * odt%num_vals_per_obs
-    start_val = ((start - 1) * odt%num_vals_per_obs) + 1
-    end_val = (end * odt%num_vals_per_obs)
+    scnd_val_retrieve = scnd_num_retrieve * (odt%num_vals_per_obs + odt%num_qc_per_obs)
+    start_val = ((start - 1) * (odt%num_vals_per_obs + odt%num_qc_per_obs)) + 1
+    end_val = (end * (odt%num_vals_per_obs + odt%num_qc_per_obs))
     ! scnd_val_retrieve = 1
 
     ! if (i < odt%rem) then
@@ -1035,7 +1035,7 @@ subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     call mpi_get(obs_buffer(1:scnd_num_retrieve), scnd_num_retrieve, odt%obs_mpi, proc, obs_offset, scnd_num_retrieve, odt%obs_mpi, odt%obs_win, ierror)
     ! call mpi_get(vals_buffer(val_pos:val_pos+scnd_val_retrieve-1), scnd_val_retrieve, odt%val_mpi, i, 0, scnd_val_retrieve, &
     !     odt%val_mpi, odt%val_win, ierror)
-    call mpi_get(vals_buffer(1:val_pos+scnd_val_retrieve), scnd_val_retrieve, odt%val_mpi, proc, val_offset, &
+    call mpi_get(vals_buffer(1:scnd_val_retrieve), scnd_val_retrieve, odt%val_mpi, proc, val_offset, &
         scnd_val_retrieve, odt%val_mpi, odt%val_win, ierror)
 
     obs_pos = obs_pos + scnd_num_retrieve
@@ -1061,14 +1061,24 @@ end subroutine get_obs_contiguous
 !------------------------------------------------------------------
 subroutine get_obs_on_multi_procs(obs_buffer, vals_buffer, start_idx, end_idx, checking_arr) 
     integer,            intent(in)          :: start_idx, end_idx
-    type(obs_type_send),allocatable,intent(inout)   :: obs_buffer(:)
-    type(obs_values_qc_type),allocatable,intent(inout)  :: vals_buffer(:)
+
     ! array used as point of reference when running binary search on start_idx and end_idx
     ! todo: maybe this should be a component of the odt global data structure?
     integer,            intent(in)          :: checking_arr
 
+    type(obs_type_send),allocatable,intent(inout)   :: obs_buffer(:)
+    type(sortable_real),allocatable,intent(inout)  :: vals_buffer(:)
+    
+    ! pointers for obs_buffer and vals_buffer
+    ! why?: constrain mpi_get to subset of obs_buffer; easiest to do this with pointer
+    !       pointing to specific indices
+    type(obs_type_send)             :: obs_ptr(:) => NULL();
+    type(sortable_real)             :: val_ptr(:) => NULL();
+    integer                         :: nelems, nvals
+
     integer                                 :: startproc, endproc
     integer                                 :: curr_sidx, curr_eidx
+    integer                                 :: start_ptr, end_ptr, start_ptr_val, end_ptr_val
 
     ! Given: start index and end index for a distributed data structure
     ! Determine on which processes data is located
@@ -1082,6 +1092,10 @@ subroutine get_obs_on_multi_procs(obs_buffer, vals_buffer, start_idx, end_idx, c
 
     ! Now we know where we're starting and ending
     ! now we need to call get_obs_contiguous on startproc, endproc, and every proc in between
+    ! TODO: make a pointer buffer where indices are adjusted based on 
+    ! which process we're on
+    start_ptr = 1
+    start_ptr_val = 1
     do i = startproc, endproc
         ! calculate start index and end index on each process
         if (i /= startproc .and. i /= endproc) then
@@ -1089,12 +1103,20 @@ subroutine get_obs_on_multi_procs(obs_buffer, vals_buffer, start_idx, end_idx, c
             curr_eidx = checking_arr(i) - checking_arr(i - 1)
         else if (i == startproc) then
             curr_sidx = (checking_arr(i) - start_idx) + 1
-            end_idx = checking_arr(i)
+            curr_sidx = (odt%var_obs_per_proc(i) - curr_sidx) + 1
+            curr_eidx = odt%var_obs_per_proc(i)
         else if (i == endproc) then
             curr_sidx = 1
             curr_eidx = (checking_arr(i) - end_idx) + 1
+            curr_eidx = (odt%var_obs_per_proc(i) - curr_eidx) + 1
         endif
-        call get_obs_contiguous(obs_buffer, vals_buffer, curr_sidx, curr_eidx, i - 1)
+        nelems = (curr_eidx - curr_sidx) + 1
+        nvals = nelems * (odt%num_vals_per_obs + odt%num_qc_per_obs)
+        obs_ptr(1:nelems) => obs_buffer(start_ptr:(start_ptr+nelems)-1)
+        val_ptr(1:nvals) => vals_buffer(start_ptr_val:(start_ptr_val+nvals)-1)
+        call get_obs_contiguous(obs_ptr, vals_buffer, curr_sidx, curr_eidx, i - 1)
+        start_ptr = start_ptr + nelems
+        start_ptr_val = start_ptr_val + nvals
     enddo
 
 end subroutine get_obs_on_multi_procs

@@ -66,7 +66,9 @@ integer :: fpp_rem, fpp, file_no, file_cnt, fidx, scnd_idx
 integer :: curr_ofp, start_idx, end_idx, start_val_idx, end_val_idx
 integer :: total_obs_on_proc, total_obs
 integer :: ofp_tmp, ofp_rem, curr_key, writers
-integer :: obs_per_writer, obs_write_buf(:), val_write_buf(:), our_writer_obs, pe_on_node
+integer :: obs_per_writer, our_writer_obs, pe_on_node
+type(obs_type_send),allocatable :: obs_write_buf(:)
+type(sortable_real),allocatable :: val_write_buf(:)
 integer :: writers_per_node, writer_rem, startproc, endproc
 integer, allocatable :: num_obs_per_proc(:), checking_arr(:)
 type(obs_sequence_type) :: foo
@@ -754,7 +756,7 @@ if (writers == 100) then
     ! check if we're a writer
     if (pe_on_node < writers_per_node) then
         allocate(obs_write_buf(our_writer_obs))
-        allocate(val_write_buf(our_writer_obs*odt%num_vals_per_obs))
+        allocate(val_write_buf(our_writer_obs*(odt%num_vals_per_obs + odt%num_qc_per_obs))
 
         ! need to figure out a few things
         ! 1). from whom are we retrieving? and 
@@ -762,9 +764,9 @@ if (writers == 100) then
 
         ! part 1: find our starting obs and ending obs
         if (odt%my_pe < writer_rem) then
-            start_idx = odt%my_pe * our_writer_obs
+            start_idx = odt%my_pe * our_writer_obs + 1
         else
-            start_idx = ((our_writer_obs + 1) * writer_rem) + ((odt%my_pe - writer_rem) * our_writer_obs)
+            start_idx = ((our_writer_obs + 1) * writer_rem) + ((odt%my_pe - writer_rem) * our_writer_obs) + 1
         endif
         end_idx = start_idx + our_writer_obs - 1
         allocate(checking_arr(odt%nprocs))
@@ -775,8 +777,8 @@ if (writers == 100) then
 
         ! perform a binary search to find our starting and ending place
         ! bsindex: the process on which our starting index is located
-        startproc = binsearch(start_idx, checking_arr, odt%nprocs)
-        endproc = binsearch(end_idx, checking_arr, odt%nprocs)
+        ! startproc = binsearch(start_idx, checking_arr, odt%nprocs)
+        ! endproc = binsearch(end_idx, checking_arr, odt%nprocs)
 
         ! now we look on the (bsindex) process
         ! we need to calculate our indices
