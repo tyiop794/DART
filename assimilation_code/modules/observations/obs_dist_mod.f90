@@ -394,7 +394,7 @@ subroutine reset_obs_window()
     call mpi_win_create(odt%obs_buf, odt%our_num_obs * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
         odt%obs_win, odt%ierror) 
 
-    call mpi_win_create(odt%val_buf, odt%num_vals_per_obs * odt%our_num_obs * sizeof(odt%val_buf(1)), &
+    call mpi_win_create(odt%val_buf, (odt%num_vals_per_obs + odt%num_qc_per_obs) * odt%our_num_obs * sizeof(odt%val_buf(1)), &
         sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
         odt%val_win, odt%ierror) 
 end subroutine reset_obs_window
@@ -619,6 +619,7 @@ subroutine samplesort_obs(perc)
     c_funloc(compare_vals))
 
     ! convert back so our unpacked obs matches the sorting of our packed observations
+    ! Note: we're not doing this anymore; let's save some memory
     ! call convert_obs_set(obs_set_sort, odt%obs_buf, odt%val_buf, odt%num_vals_per_obs, odt%our_num_obs)
 
     call dbg_print('test') ! make sure my debug print works
