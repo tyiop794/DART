@@ -66,20 +66,21 @@ integer :: fpp_rem, fpp, file_no, file_cnt, fidx, scnd_idx
 integer :: curr_ofp, start_idx, end_idx, start_val_idx, end_val_idx
 integer :: total_obs_on_proc, total_obs
 integer :: ofp_tmp, ofp_rem, curr_key, writers
-integer :: obs_per_writer, our_writer_obs, pe_on_node
+integer :: obs_per_writer, our_writer_obs, pe_on_node, is_writer
 type(obs_type_send),allocatable :: obs_write_buf(:)
 type(sortable_real),allocatable :: val_write_buf(:)
-integer :: writers_per_node, writer_rem, startproc, endproc
-integer, allocatable :: num_obs_per_proc(:), checking_arr(:)
+integer :: writers_per_node, writer_rem, startproc, endproc, curr_ofp_val
+integer, allocatable :: num_obs_per_proc(:), checking_arr(:) 
+integer, allocatable, target :: num_obs_per_file(:)
 type(obs_sequence_type) :: foo
 integer, pointer :: ofp(:) => NULL()
 integer, allocatable :: ofp_buf(:)
 integer, allocatable :: has_add_file(:)
 integer, allocatable :: files_per_proc(:)
 type(obs_type_send), pointer :: obs_buf(:) => NULL()
-type(obs_values_qc_type), pointer :: val_buf(:) => NULL()
+type(sortable_real), pointer :: val_buf(:) => NULL()
 type(obs_type_send), pointer :: curr_ptr(:) => NULL()
-type(obs_values_qc_type), pointer curr_ptr_val(:) => NULL()
+type(obs_values_qc_type), pointer :: curr_ptr_val(:) => NULL()
 integer, allocatable :: obs_per_file_per_proc(:)
 character(len=metadatalength) :: read_format, meta_data
 logical :: pre_I_format, all_gone
@@ -631,7 +632,7 @@ call mpi_allreduce(MPI_IN_PLACE, total_obs, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WO
 ! note: I phased num_obs_per_proc out
 ! Please update!!!
 allocate(obs_buf(total_obs_on_proc))
-allocate(val_buf(total_obs_on_proc*(num_copies_in + num_qc_in))
+allocate(val_buf(total_obs_on_proc*(num_copies_in + num_qc_in)))
 
 ! wait until both buffers are allocated
 call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
@@ -755,8 +756,9 @@ if (writers == 100) then
 
     ! check if we're a writer
     if (pe_on_node < writers_per_node) then
+        is_writer = 1
         allocate(obs_write_buf(our_writer_obs))
-        allocate(val_write_buf(our_writer_obs*(odt%num_vals_per_obs + odt%num_qc_per_obs))
+        allocate(val_write_buf(our_writer_obs*(odt%num_vals_per_obs + odt%num_qc_per_obs)))
 
         ! need to figure out a few things
         ! 1). from whom are we retrieving? and 
@@ -789,15 +791,19 @@ if (writers == 100) then
         ! final step: each writer writes observations to file
         ! this is the hard part (as if the other parts weren't traumatizing enough)
 
+    else
+        is_writer = 0
     endif
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
-    ! call write_obs_seq_dist
+    call write_obs_seq_dist(obs_write_buf, val_write_buf, 'test.bin', our_writer_obs, is_writer)
 
 endif
 
 ! other procs wait for writers to finish
 call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+
+
 
   ! for the time being, let's not trim the files; another can of worms to not open
   ! also, under this system, we'll (ideally) have enough memory to store all obs
@@ -898,7 +904,7 @@ do i = 1, num_input_files
    write(msgstring1,*) 'Starting to process input sequence file ', trim(filename_seq(i))
    call error_handler(E_MSG,'obs_sequence_tool',msgstring1)
 
-   call read_obs_seq(filename_seq(i), 0, 0, 0, seq_in)
+   call read_obs_seq(filename_seq(i), 0, 0, 0, seq_in, 1)
 
    ! If you get here, there better be observations in this file which
    ! are going to be used (the process_file flag wouldn't be set otherwise.)

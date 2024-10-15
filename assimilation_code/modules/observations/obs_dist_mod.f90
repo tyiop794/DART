@@ -14,7 +14,7 @@ module obs_dist_mod
                                  set_obs_def_type_of_obs, set_obs_def_error_variance
     ! use obs_sequence_mod, only : obs_type
     use     location_mod, only : location_type, is_location_in_region, get_location, set_location, query_location
-    use     obs_kind_mod, only : MAX_DEFINED_TYPES_OF_OBS, obs_type_info(:)
+    use     obs_kind_mod, only : MAX_DEFINED_TYPES_OF_OBS, obs_type_info
     use time_manager_mod, only : time_type, set_time, print_time, print_date, get_time, &
                                  operator(-), operator(+), &
                                  operator(>), operator(<), &
@@ -188,8 +188,8 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     ! real(r8), allocatable                          :: qc(:)
     ! real(r8), allocatable                          :: all_values_qc(:)
     ! real(r8), allocatable                          :: values_qc(:)
-    type(obs_values_qc_type), allocatable          :: all_values_qc(:)
-    type(obs_values_qc_type), allocatable          :: values_qc(:), new_values_qc(:)
+    type(sortable_real), allocatable          :: all_values_qc(:)
+    type(sortable_real), allocatable          :: values_qc(:), new_values_qc(:)
     integer                                        :: total_values, all_values, vals_per_proc, total_obs, obs_per_proc, rem, &
         gather_procs, gather_obs_per_proc, gather_vals_per_proc
     integer                                        :: obs_mpi, ierror, i, d, diff, j, l, actual_proc, gather_proc, &
@@ -218,7 +218,7 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
     allocate(values_qc(gather_vals_per_proc))
     
     ! Convert to a struct with fully contiguous memory 
-    call convert_obs_set(set, conv_set, values_qc, num_values, gather_obs_per_proc)
+    call convert_obs_set(set, conv_set, values_qc, num_values, odt%num_qc_per_obs, gather_obs_per_proc)
 
     call deallocate_obs_set(set, obs_per_proc + 1, num_values)
 
@@ -254,12 +254,12 @@ subroutine dist_obs_set(set, new_set, num_obs, num_values, nprocs, root, start_p
         nprocs)
 
     ! call deallocate_obs_set(new_set, 1, num_values)
-    call allocate_obs_set(new_set, obs_per_proc, num_values)
+    call allocate_obs_set(new_set, obs_per_proc, num_values, odt%num_qc_per_obs)
 
     call mpi_barrier(MPI_COMM_WORLD, ierror)
 
     ! all procs convert their sets back to packed variants
-    call convert_obs_back(new_set, new_conv_set, new_values_qc, obs_per_proc, num_values)
+    call convert_obs_back(new_set, new_conv_set, new_values_qc, obs_per_proc, num_values, odt%num_qc_per_obs)
 
     ! After send has completed, destroy the mpi struct datatype and deallocate memory
     ! call destroy_obs_mpi(obs_mpi, vals_mpi)
@@ -428,7 +428,7 @@ subroutine get_obs_dist(key, obs)
     type(obs_type),         intent(inout)           :: obs
     ! integer,                intent(inout)           :: obs
     type(obs_type_send),allocatable                 :: obs_buffer(:)
-    type(obs_values_qc_type),allocatable            :: vals_buffer(:)
+    type(sortable_real),allocatable            :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
     integer                                         :: ierror
@@ -462,7 +462,7 @@ subroutine get_obs_dist(key, obs)
     endif
 
     ! convert observation back to packed form
-    call convert_obs_back(obs_arr, obs_buffer, vals_buffer, 1, odt%num_vals_per_obs)
+    call convert_obs_back(obs_arr, obs_buffer, vals_buffer, 1, odt%num_vals_per_obs, odt%num_qc_per_obs)
     obs = obs_arr(1)
     deallocate(obs_buffer)
     deallocate(vals_buffer)
@@ -978,8 +978,8 @@ subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     integer,                intent(in)              :: start, end ! from which obs in odt%obs_buf are we starting and ending?
     integer,                intent(in)              :: proc ! from where are we retrieving?
     ! integer,                intent(inout)           :: obs
-    type(obs_type_send),allocatable,intent(inout)   :: obs_buffer(:)
-    type(sortable_real),allocatable,intent(inout)  :: vals_buffer(:)
+    type(obs_type_send),intent(inout)   :: obs_buffer(:)
+    type(sortable_real),intent(inout)  :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc, total_values
     integer                                         :: start_val, end_val
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
@@ -1064,16 +1064,16 @@ subroutine get_obs_on_multi_procs(obs_buffer, vals_buffer, start_idx, end_idx, c
 
     ! array used as point of reference when running binary search on start_idx and end_idx
     ! todo: maybe this should be a component of the odt global data structure?
-    integer,            intent(in)          :: checking_arr
+    integer,            intent(in)          :: checking_arr(:)
 
-    type(obs_type_send),allocatable,intent(inout)   :: obs_buffer(:)
-    type(sortable_real),allocatable,intent(inout)  :: vals_buffer(:)
+    type(obs_type_send),target,intent(inout)   :: obs_buffer(:)
+    type(sortable_real),target,intent(inout)  :: vals_buffer(:)
     
     ! pointers for obs_buffer and vals_buffer
     ! why?: constrain mpi_get to subset of obs_buffer; easiest to do this with pointer
     !       pointing to specific indices
-    type(obs_type_send)             :: obs_ptr(:) => NULL();
-    type(sortable_real)             :: val_ptr(:) => NULL();
+    type(obs_type_send),pointer             :: obs_ptr(:) => NULL();
+    type(sortable_real),pointer             :: val_ptr(:) => NULL();
     integer                         :: nelems, nvals
 
     integer                                 :: startproc, endproc
@@ -1129,6 +1129,7 @@ end subroutine get_obs_on_multi_procs
 ! only writers write all of their values to a single file obs_seq.bin (assume binary for now)
 subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs, is_writer)
 
+    ! Note: error checking is needed here b/c file I/O wackiness
     ! Notes / Steps:
     ! 1). determine the offset into the file where we are starting
     ! 2). seek this offset into the file (how many obs are we skipping?; similar to what we did in read_obs_seq)
@@ -1138,14 +1139,15 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     ! 5). Profit?
     ! type(obs_sequence_type), intent(in) :: seq
     type(obs_type_send),     intent(in) :: obs_write_buf(:)
-    type(obs_values_qc_type),     intent(in) :: vals_write_buf(:)
+    type(sortable_real),     intent(in) :: vals_write_buf(:)
     integer,                 intent(in)     :: num_obs, is_writer
     character(len=*),        intent(in) :: file_name
 
-    integer :: i, file_id, rc, fd
+    integer :: i, file_id, rc, fd, j
     integer :: have(max_defined_types_of_obs)
     integer :: obs_kind_ind
     integer :: ntypes
+    integer :: val_idx
     integer(kind=MPI_OFFSET_KIND) :: soff, eoff, header_size, skip
     integer :: status(MPI_STATUS_SIZE)
     character(len=11) :: useform
@@ -1186,7 +1188,7 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     if (odt%my_pe == 0) then
         print *, 'First process writes header information'
         
-        call mpi_file_get_offset(fd, soff, odt%ierror)
+        call mpi_file_get_byte_offset(fd, soff, odt%ierror)
         ! write starting point
         call mpi_file_write(fd, 'obs_sequence', len_trim('obs_sequence'), MPI_CHARACTER, status, odt%ierror)
         call mpi_file_write(fd, 'obs_type_definitions', len_trim('obs_type_definitions'), MPI_CHARACTER, status, odt%ierror)
@@ -1215,7 +1217,7 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
         ! first time and last time are just 1 and total_obs, respectively 
         call mpi_file_write(fd, 1, 1, MPI_INTEGER, status, odt%ierror)
         call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror)
-        call mpi_file_get_offset(fd, eoff, odt%ierror)
+        call mpi_file_get_byte_offset(fd, eoff, odt%ierror)
         header_size = eoff - soff
     endif
 
@@ -1224,6 +1226,7 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     ! after header has been written, write the rest of the sequence
+    ! will attempt to follow an order similar to how original obs_write functions
     if (is_writer) then
         ! here comes the fun part!
         ! need to calculate offset to which we're writing
@@ -1236,14 +1239,19 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
         skip = (odt%obs_size * (obs_write_buf(1)%key - 1)) + header_size
         call mpi_file_seek(fd, skip, MPI_SEEK_SET, odt%ierror)
 
-        ! TODO: deal with copies and qc at a later point (after proper structure is figured out there)
-
         ! write the observations
         ! will probably make assumptions about the structure of obs_def; could be a problem?
+        val_idx = 0
         do i = 1, num_obs
            call mpi_file_write(fd, obs_write_buf(i)%prev_time, 1, MPI_INTEGER, status, odt%ierror) 
            call mpi_file_write(fd, obs_write_buf(i)%next_time, 1, MPI_INTEGER, status, odt%ierror) 
            call mpi_file_write(fd, obs_write_buf(i)%cov_group, 1, MPI_INTEGER, status, odt%ierror) 
+
+           ! write values and qc
+           do j = 1, odt%num_vals_per_obs + odt%num_qc_per_obs
+                call mpi_file_write(fd, vals_write_buf(val_idx+i)%val, 1, MPI_REAL8, status, odt%ierror) 
+           enddo
+           val_idx = val_idx + j
 
            ! observation location
            ! (assumes loc3d)
@@ -1263,81 +1271,13 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
            call mpi_file_write(fd, obs_write_buf(i)%error_variance, 1, MPI_REAL8, status, odt%ierror)
         enddo
 
-        ! calculate our starting offset
-        ! hold it! we need to write the header first!
-        ! I'm backkkkkkk.....
-        ! use the key of our first obs to calculate starting offset
-
-
     endif
 
     ! wait for our writers to finish
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-    if (rc /= 0) then
-       write(string1, *) 'unable to create observation sequence file "'//trim(file_name)//'"'
-       write(string2, *) 'open file return code = ', rc
-       call error_handler(E_ERR,'write_obs_seq',string1, source, text2=string2)
-    else
-       write(string1, *) 'opening '// trim(useform) // ' observation sequence file "'//trim(file_name)//'"'
-       call error_handler(E_MSG,'write_obs_seq',string1)
-    endif
 
-    ! Write the initial string for help in figuring out binary
-    if(write_binary_obs_sequence) then
-       write(file_id) 'obs_sequence'
-    else
-       write(file_id, *) 'obs_sequence'
-    endif
-
-    ! Figure out which of the total possible kinds (really types) exist in this
-    ! sequence, and set the array values to 0 for no, 1 for yes.
-    call set_used_kinds(seq, have)
-
-    ! Write the TOC, with only the kinds that exist in this seq.
-    call write_type_of_obs_table(file_id, useform, have)
-
-    ! First inefficient ugly pass at writing an obs sequence, need to 
-    ! update for storage size.  CHANGE - use num_obs for the max_num_obs, to
-    ! limit the amount of memory needed when this sequence is read in.
-    if(write_binary_obs_sequence) then
-       write(file_id) seq%num_copies, seq%num_qc, seq%num_obs, seq%num_obs
-    else
-       write(file_id, *) ' num_copies: ',seq%num_copies, ' num_qc: ',     seq%num_qc
-       write(file_id, *) ' num_obs: ',   seq%num_obs,    ' max_num_obs: ',seq%num_obs
-    endif 
-
-    do i = 1, seq%num_copies
-       if(write_binary_obs_sequence) then
-          write(file_id) seq%copy_meta_data(i)
-       else
-          write(file_id, '(a)') seq%copy_meta_data(i)
-       endif
-    end do
-
-    do i = 1, seq%num_qc
-       if(write_binary_obs_sequence) then
-          write(file_id) seq%qc_meta_data(i)
-       else
-          write(file_id, '(a)') seq%qc_meta_data(i)
-       endif
-    end do
-
-    if(write_binary_obs_sequence) then
-       write(file_id) seq%first_time, seq%last_time
-    else
-       write(file_id, *) ' first: ',seq%first_time, ' last: ',seq%last_time
-    endif
-
-    do i = 1, seq%num_obs
-       if(.not. write_binary_obs_sequence) write(file_id, *) 'OBS ',seq%obs(i)%key
-       call write_obs(seq%obs(i), file_id, seq%num_copies, seq%num_qc)
-    end do
-
-    ! Close up the file
-    call close_file(file_id)
-
-    write(string1, *) 'closed observation sequence file "'//trim(file_name)//'"'
-    call error_handler(E_MSG,'write_obs_seq',string1)
+    ! close the file
+    call mpi_file_close(fd, odt%ierror)
 
 end subroutine write_obs_seq_dist
 
@@ -1387,7 +1327,7 @@ subroutine get_obs_set(keys, obs, num_keys)
     type(obs_type),         intent(inout)           :: obs(:)
     ! integer,                intent(inout)           :: obs
     type(obs_type_send),allocatable                 :: obs_buffer(:)
-    type(obs_values_qc_type),allocatable            :: vals_buffer(:)
+    type(sortable_real),allocatable            :: vals_buffer(:)
     integer                                         :: val_pos, obs_pos, obs_pe, rem_proc, total_values
     integer(kind=MPI_ADDRESS_KIND)                  :: obs_offset, val_offset
     integer                                         :: ierror, i, d, get_cnt
@@ -1439,7 +1379,7 @@ subroutine get_obs_set(keys, obs, num_keys)
     print *, 'time to get (get_obs_set): ', etime - stime
 
     ! convert observation(s) back to packed form
-    call convert_obs_back(obs, obs_buffer, vals_buffer, num_keys, odt%num_vals_per_obs)
+    call convert_obs_back(obs, obs_buffer, vals_buffer, num_keys, odt%num_vals_per_obs, odt%num_qc_per_obs)
 
     ! print *, 'Average time to get: ', ttime / get_cnt
     ! obs = obs_arr(1)
@@ -1486,7 +1426,7 @@ subroutine setup_obs_mpi(mpi_obstype, mpi_valstype)
     ! type(obs_values_qc_type),target  :: val_placeholder(1)
     ! type(obs_values_qc_type) :: init_val
     type(sortable_real) :: init_val
-    type(obs_values_qc_type), pointer :: null_ptr(:) 
+    type(sortable_real), pointer :: null_ptr(:) 
     ! null_ptr => NULL()
     ! initial%vals_ptr => val_placeholder
     ! initial => odt%obs_buf(1)
@@ -1653,7 +1593,7 @@ subroutine sort_obs_send_by_time(obs_set, values_qc, num_values, num_obs)
     ! todo: make this sort in-place; too much memory used currently
     ! need to allocate two massive arrays
     type(obs_type_send), target,        intent(inout)       :: obs_set(num_obs)
-    type(obs_values_qc_type), target,   intent(inout)       :: values_qc(num_obs * num_values)
+    type(sortable_real), target,   intent(inout)       :: values_qc(num_obs * num_values)
     integer,                            intent(in)          :: num_values, num_obs 
     integer                                                 :: i, next_time, j, k, val_idx, x, total_values, l
     integer                                                 :: start
@@ -1732,7 +1672,7 @@ subroutine sort_obs_by_time_alt(obs_set, values_qc, num_values, num_obs)
     ! todo: make this sort in-place; too much memory used currently
     ! need to allocate two massive arrays
     type(obs_type_send), target,        intent(inout)       :: obs_set(num_obs)
-    type(obs_values_qc_type), target,   intent(inout)       :: values_qc(num_obs * num_values)
+    type(sortable_real), target,   intent(inout)       :: values_qc(num_obs * num_values)
     integer,                            intent(in)          :: num_values, num_obs
     integer                                                 :: i, next_time, j, k, val_idx, x, total_values, l
     integer(C_SIZE_T)                                       :: num_obs_c, total_vals_c, sizeof_val, sizeof_obs
@@ -1788,7 +1728,7 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     integer,                    intent(inout)      :: num_values
 
     type(obs_type_send), allocatable                :: conv_set(:)
-    type(obs_values_qc_type), allocatable            :: values_qc(:)
+    type(sortable_real), allocatable            :: values_qc(:)
     integer                                        :: total_values
     integer                                        :: obs_mpi, ierror, i, d, diff, val_mpi
 
@@ -1798,7 +1738,7 @@ subroutine send_obs_set(set, proc, num_obs, num_values)
     allocate(values_qc(total_values * 10))
     
     ! Convert to a struct with fully contiguous memory 
-    call convert_obs_set(set, conv_set, values_qc, num_values, num_obs)
+    call convert_obs_set(set, conv_set, values_qc, num_values, odt%num_qc_per_obs, num_obs)
 
     ! if (proc == 1) then
     !     print *, 'values(1) (before recv): ', values(1)
@@ -1839,7 +1779,7 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
     integer,                    intent(inout)      :: num_values
 
     type(obs_type_send), allocatable               :: conv_set(:)
-    type(obs_values_qc_type), allocatable          :: values_qc(:)
+    type(sortable_real), allocatable          :: values_qc(:)
     integer                                        :: total_values
     integer                                        :: obs_mpi, ierror, i, diff, d, val_mpi
 
@@ -1865,7 +1805,7 @@ subroutine recv_obs_set(set, proc, num_obs, num_values)
     ! print *, '3'
 
     ! print *, 'set(1)%values(1) (before convert_obs_back): ', set(1)%values(1)
-    call convert_obs_back(set, conv_set, values_qc, num_obs, num_values)
+    call convert_obs_back(set, conv_set, values_qc, num_obs, num_values, odt%num_qc_per_obs)
     ! print *, 'set(1)%key (before setting values): ', set(1)%key
 
     ! if (allocated(set(1)%values)) then
@@ -1897,8 +1837,8 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     type(obs_type_send), allocatable               :: all_conv_set(:)
     ! real(r8), allocatable                          :: values(:)
     ! real(r8), allocatable                          :: qc(:)
-    type(obs_values_qc_type), allocatable           :: all_values_qc(:)
-    type(obs_values_qc_type), allocatable           :: values_qc(:)
+    type(sortable_real), allocatable           :: all_values_qc(:)
+    type(sortable_real), allocatable           :: values_qc(:)
     integer                                        :: total_values, all_values, vals_per_proc, total_obs, val_mpi
     integer                                        :: obs_mpi, ierror, i, d, diff, j, l
 
@@ -1924,7 +1864,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     
     ! Convert to a struct with fully contiguous memory 
     if (my_task_id() == root) then
-        call convert_obs_set(set, all_conv_set, all_values_qc, num_values, total_obs)
+        call convert_obs_set(set, all_conv_set, all_values_qc, num_values, odt%num_qc_per_obs, total_obs)
     endif
 
     ! Setup the dedicated data structure
@@ -1937,7 +1877,7 @@ subroutine scatter_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, r
     call mpi_scatter(all_values_qc, vals_per_proc, val_mpi, values_qc, vals_per_proc, val_mpi, 0, MPI_COMM_WORLD, ierror)
 
     ! Repack obs sequence
-    call convert_obs_back(new_set, conv_set, values_qc, num_obs_per_proc, num_values)
+    call convert_obs_back(new_set, conv_set, values_qc, num_obs_per_proc, num_values, odt%num_qc_per_obs)
     ! print *, 'set(1)%key (before setting values): ', set(1)%key
     ! do values_qc conversion, but in reverse
     
@@ -1958,7 +1898,7 @@ end subroutine scatter_obs_set
 subroutine gather_obs_varied(dest, src, dest_val, src_val, obs_mpi, val_mpi, num_values, num_obs, num_procs)
     integer,                     intent(in)         :: obs_mpi, val_mpi, num_values, num_procs, num_obs
     type(obs_type_send),          intent(inout)      :: dest(:), src(:)
-    type(obs_values_qc_type),          intent(inout)      :: dest_val(:), src_val(:)
+    type(sortable_real),          intent(inout)      :: dest_val(:), src_val(:)
     integer                                         :: obs_per_proc, rem, i, j, k, ierror, vals_per_proc
     integer , allocatable                                        :: disp(:), disp_vals(:), count(:), count_vals(:)
 
@@ -2008,7 +1948,7 @@ end subroutine gather_obs_varied
 subroutine scatter_obs_varied(dest, src, dest_val, src_val, obs_mpi, val_mpi, num_values, num_obs, num_procs)
     integer,                     intent(in)         :: obs_mpi, val_mpi, num_values, num_procs, num_obs
     type(obs_type_send),          intent(inout)      :: dest(:), src(:)
-    type(obs_values_qc_type),          intent(inout)      :: dest_val(:), src_val(:)
+    type(sortable_real),          intent(inout)      :: dest_val(:), src_val(:)
     integer                                         :: obs_per_proc, rem, i, j, k, ierror, vals_per_proc
     integer , allocatable                                        :: disp(:), disp_vals(:), count(:), count_vals(:)
 
@@ -2067,8 +2007,8 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
     type(obs_type_send), allocatable               :: all_conv_set(:)
     ! real(r8), allocatable                          :: values(:)
     ! real(r8), allocatable                          :: qc(:)
-    type(obs_values_qc_type), allocatable           :: all_values_qc(:)
-    type(obs_values_qc_type), allocatable           :: values_qc(:)
+    type(sortable_real), allocatable           :: all_values_qc(:)
+    type(sortable_real), allocatable           :: values_qc(:)
     integer(i8)                                    :: total_values, all_values, vals_per_proc
     integer                                        :: obs_mpi, ierror, i, d, diff, j, l, first, val_mpi, total_obs
 
@@ -2089,7 +2029,7 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
     ! allocate(qc(total_values * 10))
     
     ! Convert to a struct with fully contiguous memory 
-    call convert_obs_set(set, conv_set, values_qc, num_values, num_obs_per_proc)
+    call convert_obs_set(set, conv_set, values_qc, num_values, odt%num_qc_per_obs, num_obs_per_proc)
 
     ! Setup the dedicated data structure
     call setup_obs_mpi(obs_mpi, val_mpi)
@@ -2122,7 +2062,7 @@ subroutine gather_obs_set(set, new_set, num_obs_per_proc, num_values, nprocs, ro
         !     endif
         ! enddo
         
-        call convert_obs_back(new_set, all_conv_set, all_values_qc, total_obs, num_values)
+        call convert_obs_back(new_set, all_conv_set, all_values_qc, total_obs, num_values, odt%num_qc_per_obs)
         ! print *, 'set(1)%key (before setting values): ', set(1)%key
         ! do values_qc conversion, but in reverse
         
@@ -2316,11 +2256,11 @@ subroutine convert_obs_back(recv, simple_obs, simple_val_qc, num_obs, num_values
     diff = num_values - 1
     do i = 1, num_obs
         do j = 1, num_values
-            recv(i)%values(j) = simple_val_qc%val(j+d-1)
+            recv(i)%values(j) = simple_val_qc(j+d-1)%val
         enddo
         d = d + num_values
         do j = 1, num_qc
-            recv(i)%qc(j) = simple_val_qc%val(j+d-1)
+            recv(i)%qc(j) = simple_val_qc(j+d-1)%val
         enddo
         d = d + num_qc
     enddo
@@ -2450,7 +2390,7 @@ end subroutine sort_roundrobin
 subroutine sort_roundrobin_inplace(obs_set, values_qc, num_obs, num_values, num_procs)
     type(obs_type_send), target,             intent(inout)       :: obs_set(:)
     integer,                    intent(in)       :: num_procs, num_obs, num_values
-    type(obs_values_qc_type), target,            intent(inout)      :: values_qc(:)
+    type(sortable_real), target,            intent(inout)      :: values_qc(:)
     integer                                      :: i, j, obs_per_proc, rem, k, obs_per_proc_rem, total_values, these_obs, d
     integer(C_SIZE_T)                            :: num_obs_c, total_vals_c, sizeof_val, sizeof_obs
     integer, allocatable                                      :: procs(:)

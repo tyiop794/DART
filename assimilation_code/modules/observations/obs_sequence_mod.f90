@@ -1404,7 +1404,7 @@ endif
 ! call allocate_obs_set(buffer, shifted_alloc, total_copies)
 ! call allocate_obs_set(buffer, num_alloc, total_copies)
 if (my_task_id() == 0) print *, 'starting allocation'
-call allocate_obs_set(buffer, num_alloc, total_copies)
+call allocate_obs_set(buffer, num_alloc, total_copies, num_qc)
 if (my_task_id() == 0) print *, 'finishing allocation'
 ! print *, num_obs_per_proc
 ! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
@@ -1488,7 +1488,7 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! total_obs = num_obs_per_proc * mpi_num
 ! if (mpi_num > 1) then
 if (my_task_id() == 0) print *, 'Initializing obs window'
-call initialize_obs_window(buffer, num_obs_per_proc, total_copies, total_obs, rem, num_alloc, dist_type, mpi_num, 0) 
+call initialize_obs_window(buffer, num_obs_per_proc, total_copies, num_qc, total_obs, rem, num_alloc, dist_type, mpi_num, 0) 
 
 ! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
@@ -1498,7 +1498,7 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! For obs_sequence_tool, as soon as we're done with reading the obs and setting up the buffer, get outta here!
 return 
 
-! call samplesort_obs(1)
+call samplesort_obs(1)
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 if (odt%test_mode) then
     call samplesort_test()
@@ -1547,7 +1547,7 @@ if (my_task_id() < size .and. dist_type == 1) then
     ! call mpi_win_lock_all(MPI_MODE_NOCHECK, odt%val_win, ierror)
     allocate(keys(total_obs))
     ! allocate(full_buf(total_obs))
-    call allocate_obs_set(full_buf, total_obs, num_copies)
+    call allocate_obs_set(full_buf, total_obs, num_copies, num_qc)
 
     ! j = 0
     ! i = 1

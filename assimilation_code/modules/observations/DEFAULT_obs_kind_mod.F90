@@ -121,7 +121,7 @@ type obs_type_type
    logical              :: use_precomputed_FO = .false.
 end type obs_type_type
 
-type(obs_type_type) :: obs_type_info(max_defined_types_of_obs)
+type(obs_type_type),public :: obs_type_info(max_defined_types_of_obs)
 
 ! An observation quantity type stores a unique integer index,
 ! a character string which matches the integer parameter name,
