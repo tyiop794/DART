@@ -1198,9 +1198,10 @@ end subroutine calc_obs_params
 !------------------------------------------------------------------
 
 !------------------------------------------------------------------
-subroutine get_obs_size(file_id, obs_size, num_values, init_pos)
+subroutine get_obs_size(file_id, obs_size, num_values, num_qc, init_pos)
     integer,            intent(in)          :: file_id
     integer,            intent(in)          :: num_values
+    integer,            intent(in)          :: num_qc
     integer,            intent(out)         :: obs_size
     integer(i8),        intent(out)         :: init_pos
     type(obs_type)                          :: test_obs
@@ -1267,8 +1268,20 @@ real(r8) :: mpi_time, stime, etime
 ! Use read_obs_seq_header to get file format and header info
 ! KY Header can be read by all processes
 ! print *, '1'
+! note: if using obs_seq_tool, this is redundant
+! since we have already read the headers in obs_seq_tool (parallel read)
+! okay, you win, let's read the headers again
 call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
    max_num_obs, file_id, read_format, dummy)
+if (odt%my_pe == 0) print *, 'num_copies: ', num_copies 
+if (odt%my_pe == 0) print *, 'num_qc: ', num_qc 
+if (odt%my_pe == 0) print *, 'num_obs: ', num_obs 
+if (odt%obs_seq_tool == 1) then
+    ! file_id = open_file(file_name, form='unformatted', action='read')
+    num_copies = odt%num_vals_per_obs
+    num_qc = odt%num_qc_per_obs
+    num_obs = odt%total_obs
+endif
 
 ! total_copies = num_copies + add_copies
 ! total_obs = num_obs + add_obs
@@ -1276,7 +1289,7 @@ call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
 ! print *, '2'
 total_copies = num_copies
 total_obs = num_obs
-if (my_task_id() == 0) print *, 'total_obs: ', total_obs
+if (odt%my_pe == 0) print *, 'total_obs: ', total_obs
 root = 0
 
 ! Split by how much?
@@ -1285,11 +1298,19 @@ root = 0
 ! num_split = 8 ! maybe don't hardcode this?
 
 ! Check number of processes and divide obs number to build blocks of obs
-mpi_num = task_count()
-num_obs_per_proc = total_obs / mpi_num
-rem = modulo(total_obs, mpi_num)
-num_alloc = num_obs_per_proc + 1
-my_pe = my_task_id()
+! mpi_num = task_count()
+mpi_num = odt%nprocs
+if (odt%obs_seq_tool == 0) then
+    num_obs_per_proc = total_obs / mpi_num
+    rem = modulo(total_obs, mpi_num)
+    num_alloc = num_obs_per_proc + 1
+else
+    num_obs_per_proc = odt%our_num_obs
+    rem = 0 
+    num_alloc = odt%our_num_obs
+endif
+! my_pe = my_task_id()
+my_pe = odt%my_pe
 
 my_obs = num_obs_per_proc
 if (my_pe < rem) my_obs = my_obs + 1 
@@ -1302,7 +1323,7 @@ if (my_pe < rem) my_obs = my_obs + 1
 !     allocate(all_next_obs_keys(1))
 ! endif
 ! Get number of threads and nodes
-call get_job_info(nranks, nnodes) ! ranks rather than threads
+! call get_job_info(nranks, nnodes) ! ranks rather than threads
 
 ! obs_per_proc = total_obs / num_split
 ! allocate memory into a buffer
@@ -1323,6 +1344,7 @@ seq%num_obs = num_obs
 do i = 1, num_copies
    if(read_format == 'unformatted') then
       read(file_id, iostat=io) seq%copy_meta_data(i)
+      if (odt%my_pe == 0) print *, 'copy_meta_data: ', seq%copy_meta_data(i)
    else
       read(file_id, '(a)', iostat=io) seq%copy_meta_data(i)
    endif
@@ -1337,6 +1359,7 @@ end do
 do i = 1, num_qc
    if(read_format == 'unformatted') then
       read(file_id, iostat=io) seq%qc_meta_data(i)
+      if (odt%my_pe == 0) print *, 'qc_meta_data: ', seq%qc_meta_data(i)
    else
       read(file_id, '(a)', iostat=io) seq%qc_meta_data(i)
    endif
@@ -1350,6 +1373,8 @@ end do
 ! Read the first and last avail_time pointers
 if(read_format == 'unformatted') then
    read(file_id, iostat=io) seq%first_time, seq%last_time
+   ! print *, 'first_time: ', seq%first_time, '; pe: ', odt%my_pe
+   ! print *, 'last_time: ', seq%last_time, '; pe: ', odt%my_pe
 else
    read(file_id, *, iostat=io) label(1),seq%first_time,label(2), seq%last_time
 endif
@@ -1379,8 +1404,8 @@ shifted_pe = my_pe
 shifted_nprocs = mpi_num
 
 ! Get byte size of each obs
-call get_obs_size(file_id, obs_size, total_copies, init_pos)
-if (my_task_id() == 0) then
+call get_obs_size(file_id, obs_size, total_copies, num_qc, init_pos)
+if (odt%my_pe == 0) then
     print *, 'obs_size: ', obs_size
 endif
 
@@ -1391,7 +1416,7 @@ call calc_obs_params(obs_size, shifted_pe, shifted_nprocs, total_obs, init_pos, 
 ! if (my_task_id() == 0) print *, 'split_obs(1): ', split_obs
 
 ! Allocate our buffers
-if (my_task_id() == 0) then
+if (odt%my_pe == 0) then
     ! allocate(full_buf(num_alloc * task_count())
     ! call allocate_obs_set(full_buf, num_alloc*task_count(), total_copies)
     ! call allocate_obs_set(full_buf, num_obs, total_copies)
@@ -1403,15 +1428,16 @@ endif
 ! if (my_task_id() == 0) print *, 'shifted_nprocs: ', shifted_nprocs
 ! call allocate_obs_set(buffer, shifted_alloc, total_copies)
 ! call allocate_obs_set(buffer, num_alloc, total_copies)
-if (my_task_id() == 0) print *, 'starting allocation'
+if (odt%my_pe == 0) print *, 'starting allocation'
 call allocate_obs_set(buffer, num_alloc, total_copies, num_qc)
-if (my_task_id() == 0) print *, 'finishing allocation'
+if (odt%my_pe == 0) print *, 'finishing allocation'
 ! print *, num_obs_per_proc
 ! call allocate_obs_set(ordered_buf, num_alloc, total_copies)
 ! call allocate_obs_set(my_ordered_buf, num_alloc, total_copies)
 
 ! Seek the obs position
 ! obs_pos = init_pos + ((num_obs_per_proc * obs_size) * my_pe)
+! note: may need to perform error checking here at some point
 io = fseek(file_id, obs_pos, 0) 
 ! print *, 'PE: ', my_task_id(), 'obs_pos :', obs_pos
 ! return
@@ -1421,6 +1447,9 @@ io = fseek(file_id, obs_pos, 0)
 ! Read all of the observations using all procs except for those on the first node
 x = lower_bound
 ! if (shifted_pe >= 0) then
+
+! leftovers from a bygone era...
+! (seriously, why is this conditional still here?)
 if (my_pe >= 0) then
     ! print *, 'hi!'
     ! do j = 1, num_obs
@@ -1487,8 +1516,8 @@ call mpi_barrier(MPI_COMM_WORLD, ierror)
 ! call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
 ! total_obs = num_obs_per_proc * mpi_num
 ! if (mpi_num > 1) then
-if (my_task_id() == 0) print *, 'Initializing obs window'
-call initialize_obs_window(buffer, num_obs_per_proc, total_copies, num_qc, total_obs, rem, num_alloc, dist_type, mpi_num, 0) 
+if (odt%my_pe == 0) print *, 'Initializing obs window'
+call initialize_obs_window(buffer, num_obs_per_proc, total_copies, num_qc, total_obs, rem, num_alloc, dist_type, mpi_num, my_pe, 0) 
 
 ! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
@@ -1496,7 +1525,10 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, num_qc, total
 call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! For obs_sequence_tool, as soon as we're done with reading the obs and setting up the buffer, get outta here!
-return 
+if (odt%obs_seq_tool) then
+    call close_file(file_id)
+    return 
+endif
 
 call samplesort_obs(1)
 call mpi_barrier(MPI_COMM_WORLD, ierror)

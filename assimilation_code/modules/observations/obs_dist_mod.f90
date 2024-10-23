@@ -126,6 +126,7 @@ module obs_dist_mod
         ! 0: not testing
         ! 1: testing
         integer                                 :: test_mode
+        integer                                 :: obs_seq_tool
         integer                                 :: ierror
     end type obs_dist_type
     type(obs_dist_type) :: odt
@@ -313,7 +314,8 @@ integer function get_obs_offset(key)
 end function get_obs_offset
 !------------------------------------------------------------------
 !------------------------------------------------------------------
-subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, num_qc_per_obs, total_obs, rem, num_alloc, dist_type, nprocs, test_mode)
+subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, num_qc_per_obs, total_obs, rem, num_alloc, dist_type, &
+    nprocs, my_pe, test_mode)
     ! this will initialize the obs window for one-sided communication
     ! or distributed communication generally
     type(obs_type),          intent(inout)      :: buffer(:)
@@ -325,12 +327,15 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, num
     integer,                 intent(in)         :: num_alloc
     integer,                 intent(in)         :: dist_type
     integer,                 intent(in)         :: nprocs
+    integer,                 intent(in)         :: my_pe
+    integer,                 intent(in)         :: test_mode
+    ! integer,                 intent(in)         :: create_win
     integer                                     :: ierror
     integer                                     :: num_vals
-    integer                                     :: test_mode
+    ! integer                                     :: test_mode
 
     ! allocate our buffers to be number of obs on this process
-    num_vals = num_obs_per_proc * num_vals_per_obs
+    num_vals = num_obs_per_proc * (num_vals_per_obs)
     if (dist_type == 1) then
         if (.not. associated(odt%obs_buf)) then
             allocate(odt%obs_buf(num_alloc))
@@ -347,7 +352,7 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, num
     odt%num_qc_per_obs = num_qc_per_obs
     odt%total_obs = total_obs
     odt%rem = rem
-    odt%my_pe = my_task_id()
+    odt%my_pe = my_pe
     odt%nprocs = nprocs
     odt%ngets = 0
     odt%mpi_time = 0.0
@@ -356,7 +361,9 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, num
 
     ! set the number of obs associated with our process specifically
     odt%our_num_obs = odt%num_obs_per_proc
-    if (odt%my_pe < odt%rem) then
+
+    ! only do this if we aren't using obs_seq_tool....
+    if (odt%my_pe < odt%rem .and. odt%obs_seq_tool == 0) then
         odt%our_num_obs = odt%our_num_obs + 1
     endif
 
@@ -366,18 +373,18 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, num
     ! convert to sendable datatype
     ! also create mpi window of observation memory
     if (dist_type == 1) then
-        call convert_obs_set(buffer, odt%obs_buf, odt%val_buf, num_vals_per_obs, num_qc_per_obs, num_alloc)
+        call convert_obs_set(buffer, odt%obs_buf, odt%val_buf, num_vals_per_obs, num_qc_per_obs, odt%our_num_obs)
 
         ! call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
 
         ! create windows
-        call mpi_win_create(odt%obs_buf, num_alloc * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
-        odt%obs_win, &
-        ierror)
+        ! call mpi_win_create(odt%obs_buf, odt%our_num_obs * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+        ! odt%obs_win, &
+        ! ierror)
 
-        call mpi_win_create(odt%val_buf, num_alloc * (num_vals_per_obs + num_qc_per_obs) * sizeof(odt%val_buf(1)), sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
-        odt%val_win, &
-        ierror)
+        ! call mpi_win_create(odt%val_buf, odt%our_num_obs * (num_vals_per_obs + num_qc_per_obs) * sizeof(odt%val_buf(1)), sizeof(odt%val_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
+        ! odt%val_win, &
+        ! ierror)
     endif
 
 end subroutine initialize_obs_window
@@ -387,8 +394,8 @@ end subroutine initialize_obs_window
 ! obs that we currently have
 subroutine reset_obs_window()
     ! Clear our original windows
-    call mpi_win_free(odt%obs_win, ierror)
-    call mpi_win_free(odt%val_win, ierror)
+    if (odt%obs_win /= 0) call mpi_win_free(odt%obs_win, ierror)
+    if (odt%val_win /= 0) call mpi_win_free(odt%val_win, ierror)
 
     ! Create new windows using new available information
     call mpi_win_create(odt%obs_buf, odt%our_num_obs * sizeof(odt%obs_buf(1)), sizeof(odt%obs_buf(1)), MPI_INFO_NULL, MPI_COMM_WORLD, &
@@ -500,11 +507,16 @@ subroutine samplesort_obs(perc)
     integer                             :: sample_cnt
     integer                             :: j, i, per_proc, l, is_last, m, check
     integer(i8)                         :: k
+    integer(i8)                         :: x
+    integer                             :: first_weird
+    integer                             :: num_sus
+    integer                             :: num_equal
     real                                :: start_random
     integer                             :: rand_idx
     integer                             :: our_num_obs
     integer                             :: new_obs_num
     integer                             :: new_vals_num
+    integer                             :: obs_start_idx
     integer                             :: sum
     integer, allocatable                :: bucket_cnt(:)
     integer, allocatable                :: bucket_disp(:)
@@ -658,7 +670,7 @@ subroutine samplesort_obs(perc)
         call qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
         do i = 1, odt%nprocs - 1
             scnd_selection(i) = all_samples(i * per_proc)
-            ! print *, scnd_selection(i)
+            print *, scnd_selection(i)
         enddo
     endif
 
@@ -703,6 +715,7 @@ subroutine samplesort_obs(perc)
     enddo
     if (odt%my_pe == 1) print *, 'last bucket_cnt: ', bucket_cnt(odt%nprocs)
 
+
     
     ! print *, odt%my_pe, 'reached barrier'
     call mpi_barrier(MPI_COMM_WORLD, ierror)
@@ -711,13 +724,21 @@ subroutine samplesort_obs(perc)
     ! check for identical sets of keys
     ! If a bucket has no elements, that likely means the previous key engulfed all elements
     ! split the elements placed into that bucket across all buckets that have the same key 
+    ! update: this doesn't work
+    ! we need something stronger >:(
+    ! also: we need to find starting idx in our obs_buf
     i = 2
+    obs_start_idx = 0
     do while (i <= odt%nprocs)
     !do i = 1, odt%nprocs
         ! print *, 'From process', odt%my_pe, ': i = ', i
         m = 0
         is_last = 0
+        ! i - 1: process which engulfed all values
         if (bucket_cnt(i) == 0) then
+            ! idea: use obs_start_idx to determine which of
+            ! the elements in bucket_cnt(i - 1) are less than
+            ! scnd_selection value
             ! print *, 'haaah'
             if (i == odt%nprocs) then
                 is_last = 0
@@ -725,8 +746,22 @@ subroutine samplesort_obs(perc)
                 is_last = 1
             endif
             if (is_last) then
+                obs_start_idx = 0
+                if (odt%my_pe == 8) then
+                    print *, 'j: ', j
+                    print *, 'i-1: ', i - 1
+                endif
+                do j = 1, i - 2
+                    ! if (odt%my_pe == 8) then
+                    !     print *, 'dingus'
+                    ! endif
+                    obs_start_idx = obs_start_idx + bucket_cnt(j)
+                enddo
                 j = i
                 k = 0
+                ! obs_start_idx = obs_start_idx + 1
+                ! if j == i, then every element < time_actual placed in bucket
+                ! all elements == are placed in following bucket(s)
                 do while (j + k <= odt%nprocs .and. m == 0) 
                     if (j + k == odt%nprocs .and. bucket_cnt(j + k) == 0) then
                         k = k + 1
@@ -738,24 +773,52 @@ subroutine samplesort_obs(perc)
                         m = 1
                     endif
                 enddo
-                k = k + 1
-                iden_vals = bucket_cnt(i - 1) / k
+                ! k = k + 1
+                ! print *, 'k: ', k
+                ! first: exclude first bucket from this calculation
+                ! only include elems less than first bucket
+                ! in the first bucket
+                if (obs_start_idx + 1 < our_num_obs) then
+                    first_weird = obs_start_idx + 1
+                    x = odt%obs_buf(first_weird)%time_actual
+                    num_sus = 0
+                    do while (x < scnd_selection(i-1) .and. first_weird <= our_num_obs)
+                        num_sus = num_sus + 1
+                        first_weird = first_weird + 1
+                        if (first_weird <= our_num_obs) x = odt%obs_buf(first_weird)%time_actual
+                    enddo
+                else
+                    num_sus = 0
+                endif
+                ! first weird: first element that is not equality based
+                if (odt%my_pe == 8) then
+                    print *, 'num_sus: ', num_sus
+                    print *, 'obs_start_idx: ', obs_start_idx
+                    print *, 'bucket_cnt(i - 1)', bucket_cnt(i-1)
+                    print *, 'i - 1: ', i - 1
+                endif
+                ! num_sus: num of elements < equality
+                ! num_equal: num of elements == equality
+                num_equal = bucket_cnt(i - 1) - num_sus
+                bucket_cnt(i - 1) = num_sus
+                iden_vals = num_equal / k
                 ! if (odt%my_pe == 0) then
                 !     print *, 'iden_vals: ', iden_vals
                 !     print *, 'i:',  i
                 !     print *, 'k: ', k
                 !     print *, 'bucket_cnt: ', bucket_cnt(i - 1)
                 ! endif
-                iden_rem = modulo(bucket_cnt(i - 1), k)
+                iden_rem = modulo(num_equal, k)
                 l = 0
                 do while (l < k)
-                    bucket_cnt((i-1) + l) = iden_vals
+                    bucket_cnt(i + l) = iden_vals
                     if (l < iden_rem) then
-                        bucket_cnt((i-1) + l) = bucket_cnt((i - 1) + l) + 1
+                        bucket_cnt(i + l) = bucket_cnt(i + l) + 1
                     endif
                     l = l + 1
                 enddo
-                i = j + k - 1
+                ! i = j + k - 1
+                i = j + k
             else
                 i = i + 1
             endif
@@ -785,6 +848,12 @@ subroutine samplesort_obs(perc)
     allocate(val_qc_cnt(odt%nprocs))
     ! displacement of values/qc in buffer for *our* process
     allocate(val_qc_disp(odt%nprocs))
+
+    if (odt%my_pe == 8) then
+        do i = 1, odt%nprocs - 1
+            print *, 'bucket_cnt(', i, '): ', bucket_cnt(i)
+        enddo
+    endif
 
     ! print *, 'Process ', odt%my_pe, ' reached barrier #2'
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
@@ -852,6 +921,12 @@ subroutine samplesort_obs(perc)
     allocate(new_obs_set(new_obs_num))
     allocate(new_val_qc(new_vals_num))
 
+    if (odt%my_pe == 8) then
+        do i = 1, odt%nprocs - 1
+            print *, 'bucket_cnt(', i, '): ', bucket_cnt(i)
+        enddo
+    endif
+
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     call dbg_print('attempting alltoallv #1')
@@ -904,6 +979,17 @@ subroutine samplesort_obs(perc)
     call qsort(c_loc(new_val_qc(1)), int(new_vals_num, c_size_t), sizeof(new_val_qc(1)), &
     c_funloc(compare_vals))
 
+    ! *After* alltoalls and sorting have finished, check for identical keys
+    ! actually, worst-case memory situation on this is questionable... I got a better idea
+    ! if (new_obs_num == 0) then
+    !     print *, 'three MPI_Recv (MPI_ANY_SOURCE) goes here'
+    ! else if (new_obs_num /= 0 .and. scnd_selection(odt%my_pe + 1) == scnd_selection(odt%my_pe + 2)) then
+    !     print *, 'how many processes have the same key?'
+    ! endif
+    ! This guarantees that the elements which are split also have 
+    ! correctly sorted obs
+    
+
     ! call qsort(c_loc(obs_set_sort(1)), int(new_obs_num, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
     ! call convert_obs_set(obs_set_sort, new_obs_set, new_val_qc, odt%num_vals_per_obs, new_obs_num)
     
@@ -921,6 +1007,14 @@ subroutine samplesort_obs(perc)
     ! how many obs does each process have?
     allocate(odt%var_obs_per_proc(odt%nprocs))
     call mpi_allgather(new_obs_num, 1, MPI_INTEGER, odt%var_obs_per_proc, 1, MPI_INTEGER, MPI_COMM_WORLD, odt%ierror)
+
+    if (odt%my_pe == 6) then
+        print *, 'odt%obs_buf(new_obs_num): ', odt%obs_buf(new_obs_num)%time_actual
+    endif
+
+    if (odt%my_pe == 7) then
+        print *, 'odt%obs_buf(1): ', odt%obs_buf(1)%time_actual
+    endif
     ! odt%var_obs_per_proc => new_cnt
 
     ! if (odt%my_pe == 0) then
@@ -930,6 +1024,11 @@ subroutine samplesort_obs(perc)
     !     call print_obs_send(new_obs_set(new_obs_num))
     ! endif
 
+    if (odt%my_pe == 0) then
+        do i = 1, odt%nprocs
+            print *, 'odt%var_obs_per_proc(', i, '): ', odt%var_obs_per_proc(i)
+        enddo 
+    endif
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     call dbg_print('made it to the end')
 end subroutine samplesort_obs
@@ -1011,7 +1110,7 @@ subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     obs_offset = 0
     val_offset = 0
 
-    print *, 'odt%num_obs_per_proc: ', odt%num_obs_per_proc
+    ! print *, 'odt%num_obs_per_proc: ', odt%num_obs_per_proc
     scnd_num_retrieve = odt%num_obs_per_proc
     obs_pos = 1
     val_pos = 1
@@ -1078,15 +1177,35 @@ subroutine get_obs_on_multi_procs(obs_buffer, vals_buffer, start_idx, end_idx, c
     integer                         :: nelems, nvals
 
     integer                                 :: startproc, endproc
+    integer                                 :: total_elems
     integer                                 :: curr_sidx, curr_eidx
     integer                                 :: start_ptr, end_ptr, start_ptr_val, end_ptr_val
 
     ! Given: start index and end index for a distributed data structure
     ! Determine on which processes data is located
     ! O(2logn) => O(logn): pretty good! (where n = nprocs)
-    startproc = binsearch(start_idx, checking_arr, odt%nprocs)
-    endproc = binsearch(end_idx, checking_arr, odt%nprocs)
+    ! although we're not really saving that much compared to linear search...
+    ! startproc = binsearch(start_idx, checking_arr, odt%nprocs)
+    ! endproc = binsearch(end_idx, checking_arr, odt%nprocs)
 
+    startproc = 0
+    endproc = 0
+    total_elems = 0
+    do i = 1, odt%nprocs
+        if (start_idx <= checking_arr(i) .and. startproc == 0) then
+            startproc = i
+        endif
+        if (end_idx <= checking_arr(i) .and. endproc == 0) then
+            endproc = i
+        endif
+        if (startproc /= 0 .and. endproc /= 0) then
+            exit
+        endif
+    enddo
+    ! print *, 'startproc: ', startproc
+    ! print *, 'endproc: ', endproc
+    ! print *, 'checking_arr(startproc): ', checking_arr(startproc)
+    ! print *, 'checking_arr(endproc): ', checking_arr(startproc)
     ! account for the fact that Fortran indices are weird
     ! startproc = startproc - 1
     ! endproc = endproc - 1
@@ -1102,6 +1221,12 @@ subroutine get_obs_on_multi_procs(obs_buffer, vals_buffer, start_idx, end_idx, c
         if (i /= startproc .and. i /= endproc) then
             curr_sidx = 1
             curr_eidx = checking_arr(i) - checking_arr(i - 1)
+        else if (i == startproc .and. i == endproc) then
+            ! print *, 'do something whack'
+            ! also: need to check array bounds
+            ! this is just a quick patch!
+            curr_sidx = (start_idx - checking_arr(i-1))
+            curr_eidx = curr_sidx + ((end_idx - start_idx))
         else if (i == startproc) then
             curr_sidx = (checking_arr(i) - start_idx) + 1
             curr_sidx = (odt%var_obs_per_proc(i) - curr_sidx) + 1
@@ -1113,12 +1238,17 @@ subroutine get_obs_on_multi_procs(obs_buffer, vals_buffer, start_idx, end_idx, c
         endif
         nelems = (curr_eidx - curr_sidx) + 1
         nvals = nelems * (odt%num_vals_per_obs + odt%num_qc_per_obs)
+        ! if (start_ptr == 103307 .or. ((start_ptr+nelems)-1) == 103307) then
+        !     print *, 'huh at process ', odt%my_pe
+        ! endif
         obs_ptr(1:nelems) => obs_buffer(start_ptr:(start_ptr+nelems)-1)
         val_ptr(1:nvals) => vals_buffer(start_ptr_val:(start_ptr_val+nvals)-1)
-        call get_obs_contiguous(obs_ptr, vals_buffer, curr_sidx, curr_eidx, i - 1)
+        call get_obs_contiguous(obs_ptr, val_ptr, curr_sidx, curr_eidx, i - 1)
         start_ptr = start_ptr + nelems
         start_ptr_val = start_ptr_val + nvals
+        total_elems = total_elems + nelems
     enddo
+    ! print *, 'total_elems: ', total_elems
 
 end subroutine get_obs_on_multi_procs
 !------------------------------------------------------------------
