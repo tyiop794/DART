@@ -1258,6 +1258,11 @@ end subroutine get_obs_on_multi_procs
 ! ideally: every process calls this function
 ! (so that we can use a barrier on MPI_COMM_WORLD)
 ! only writers write all of their values to a single file obs_seq.bin (assume binary for now)
+! currently a proof-of-concept: can only write one kind of obs_def
+! future idea: linearize the obs and values (convert all values to real(r8))
+! and then have the conversion handled by a dedicated function in each model (OOP babyyyyy!)
+! (will be hell for all future model writers [one more function to implement] 
+! but it's the only way this can be fully implemented across all DART models)
 subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs, is_writer)
 
     ! Note: error checking is needed here b/c file I/O wackiness
@@ -1296,7 +1301,7 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     ! create file if it does not exist
     ! place the file in write-only mode
     ! note: this is collective; every process must call this
-    call mpi_file_open(MPI_COMM_WORLD, 'combo.bin', MPI_MODE_WRONLY + MPI_MODE_CREATE, MPI_INFO_NULL, fd, odt%ierror)
+    call mpi_file_open(MPI_COMM_WORLD, file_name, MPI_MODE_WRONLY + MPI_MODE_CREATE, MPI_INFO_NULL, fd, odt%ierror)
 
     ! only write to file if we are a writer
     ! todo: determine the types of obs we have
@@ -1316,8 +1321,8 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
 
     ! will be used when writing the header
     ! begin writing the file header
+    ! first process writes this info; other processes wait at header size bcast
     if (odt%my_pe == 0) then
-        print *, 'First process writes header information'
         
         call mpi_file_get_byte_offset(fd, soff, odt%ierror)
         ! write starting point
@@ -1336,8 +1341,11 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
         ! write num_obs and num_copies
         call mpi_file_write(fd, odt%num_vals_per_obs, 1, MPI_INTEGER, status, odt%ierror)
         call mpi_file_write(fd, odt%num_qc_per_obs, 1, MPI_INTEGER, status, odt%ierror)
-        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror)
-        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror)
+        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror) ! num_obs
+        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror) ! max_num_obs
+
+        ! todo: need to figure out how to get val_md and qc_md into their correct locations
+        ! okay I have something which should (?) work (every process reads in info when reading the files)
         do i = 1, odt%num_vals_per_obs
             call mpi_file_write(fd, odt%val_md(i), metadatalength, MPI_CHARACTER, status, odt%ierror)
         enddo
@@ -1372,6 +1380,9 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
 
         ! write the observations
         ! will probably make assumptions about the structure of obs_def; could be a problem?
+        ! another reason why linearization could be useful -> could use that flexibility
+        ! also, we're not handling external_FO for the time being 
+        ! it also looks like additional information may be written for each kind
         val_idx = 0
         do i = 1, num_obs
            call mpi_file_write(fd, obs_write_buf(i)%prev_time, 1, MPI_INTEGER, status, odt%ierror) 
@@ -1380,7 +1391,7 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
 
            ! write values and qc
            do j = 1, odt%num_vals_per_obs + odt%num_qc_per_obs
-                call mpi_file_write(fd, vals_write_buf(val_idx+i)%val, 1, MPI_REAL8, status, odt%ierror) 
+                call mpi_file_write(fd, vals_write_buf(val_idx+j)%val, 1, MPI_REAL8, status, odt%ierror) 
            enddo
            val_idx = val_idx + j
 

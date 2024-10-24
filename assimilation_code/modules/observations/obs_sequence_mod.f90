@@ -1273,6 +1273,16 @@ real(r8) :: mpi_time, stime, etime
 ! okay, you win, let's read the headers again
 call read_obs_seq_header(file_name, num_copies, num_qc, num_obs, &
    max_num_obs, file_id, read_format, dummy)
+
+! read the obs val and qc metadata; first verify whether buffers are allocated
+if (.not. allocated(odt%val_md)) then
+    allocate(odt%val_md(num_copies))
+endif
+if (.not. allocated(odt%qc_md)) then
+    allocate(odt%qc_md(num_qc))
+endif
+
+! some test code; nothing to see here....
 if (odt%my_pe == 0) print *, 'num_copies: ', num_copies 
 if (odt%my_pe == 0) print *, 'num_qc: ', num_qc 
 if (odt%my_pe == 0) print *, 'num_obs: ', num_obs 
@@ -1341,9 +1351,13 @@ call init_obs_sequence(seq, num_copies + add_copies, &
 seq%num_obs = num_obs
 
 ! Get the available copy_meta_data
+! note: since every process is reading files during obs_sequence_tool duration...
+! and since we're assuming that every obs in every file has the same number of values and qc....
+! reading the md across every process should work just fine! (hopefully)
 do i = 1, num_copies
    if(read_format == 'unformatted') then
       read(file_id, iostat=io) seq%copy_meta_data(i)
+      odt%val_md(i) = seq%copy_meta_data(i)
       if (odt%my_pe == 0) print *, 'copy_meta_data: ', seq%copy_meta_data(i)
    else
       read(file_id, '(a)', iostat=io) seq%copy_meta_data(i)
@@ -1359,6 +1373,7 @@ end do
 do i = 1, num_qc
    if(read_format == 'unformatted') then
       read(file_id, iostat=io) seq%qc_meta_data(i)
+      odt%qc_md(i) = seq%qc_meta_data(i)
       if (odt%my_pe == 0) print *, 'qc_meta_data: ', seq%qc_meta_data(i)
    else
       read(file_id, '(a)', iostat=io) seq%qc_meta_data(i)
@@ -1405,9 +1420,11 @@ shifted_nprocs = mpi_num
 
 ! Get byte size of each obs
 call get_obs_size(file_id, obs_size, total_copies, num_qc, init_pos)
-if (odt%my_pe == 0) then
-    print *, 'obs_size: ', obs_size
-endif
+! if (odt%my_pe == 0) then
+!     print *, 'obs_size: ', obs_size
+! endif
+! save globally so we can use it when we write
+odt%obs_size = obs_size
 
 ! Determine num obs per procs and starting obs
 ! total_obs = num_obs_per_proc * mpi_num

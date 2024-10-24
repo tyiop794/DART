@@ -962,6 +962,7 @@ if (writers == 100) then
         call get_obs_on_multi_procs(obs_write_buf, val_write_buf, start_idx, end_idx, checking_arr)
 
         ! Let's do a sanity check
+        ! (Sanity check on me: FAIL (well, crap!))
         ! Make sure all the data is being received as it should
         ! (at least for the obs)
         ! do i = 1, our_writer_obs
@@ -995,13 +996,14 @@ if (writers == 100) then
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     call dbg_print('Checkpoint 7 passed')
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-    call exit(0)
+    ! call exit(0)
     ! return
 
     call write_obs_seq_dist(obs_write_buf, val_write_buf, 'test.bin', our_writer_obs, is_writer)
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     call dbg_print('Checkpoint 8 passed')
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    call exit(0)
     ! return
 
 endif
