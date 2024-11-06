@@ -363,12 +363,17 @@ subroutine initialize_obs_window(buffer, num_obs_per_proc, num_vals_per_obs, num
     odt%our_num_obs = odt%num_obs_per_proc
 
     ! only do this if we aren't using obs_seq_tool....
-    if (odt%my_pe < odt%rem .and. odt%obs_seq_tool == 0) then
+    ! if (odt%my_pe < odt%rem .and. odt%obs_seq_tool == 0) then
+    !     odt%our_num_obs = odt%our_num_obs + 1
+    ! endif
+    if (odt%my_pe < odt%rem) then
         odt%our_num_obs = odt%our_num_obs + 1
     endif
 
     ! setup our datatypes
-    call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
+    if (odt%obs_seq_tool == 0) then
+        call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
+    endif
 
     ! convert to sendable datatype
     ! also create mpi window of observation memory
@@ -505,7 +510,7 @@ subroutine samplesort_obs(perc)
     integer                             :: all_sample_num
     integer                             :: our_sample_num
     integer                             :: sample_cnt
-    integer                             :: j, i, per_proc, l, is_last, m, check
+    integer                             :: j, i, per_proc, l, is_last, m, check, d
     integer(i8)                         :: k
     integer(i8)                         :: x
     integer                             :: first_weird
@@ -608,11 +613,25 @@ subroutine samplesort_obs(perc)
         enddo
     endif
 
+    ! very simple fix to a very stupid problem
+    d = 1
+    do i = 1, odt%our_num_obs
+        odt%obs_buf(i)%val_idx = d
+        d = d + odt%num_vals_per_obs
+        d = d + odt%num_qc_per_obs
+    enddo
+
     ! would this even work?! this is so cursed...
     if (odt%my_pe == 0) print *, 'sorting observations in time order'
     ! call qsort(c_loc(obs_set_sort(1)), int(odt%our_num_obs, c_size_t), sizeof(obs_set_sort(1)), c_funloc(compare_time_types_alt))
 
     ! qsort but just the unpacked obs (i have an idea)
+    ! if (odt%my_pe == 0) then
+    !     do i = 1, odt%our_num_obs
+    !         print *, 'odt%obs_buf(', i, ')%val_idx: ', odt%obs_buf(i)%val_idx
+    !     enddo
+    ! endif
+
     call qsort(c_loc(odt%obs_buf(1)), int(odt%our_num_obs, c_size_t), sizeof(odt%obs_buf(1)), c_funloc(compare_obs))
 
     ! set associated times for values (to sort values properly)
@@ -625,10 +644,19 @@ subroutine samplesort_obs(perc)
             l = l + 1
         enddo
     enddo
+    ! if (odt%my_pe == 0) then
+    !     do i = 1, odt%our_num_obs * (odt%num_vals_per_obs + odt%num_qc_per_obs)
+    !         print *, 'time_order(', i, '): ', odt%val_buf(i)%time_order
+    !     enddo
+    ! endif
 
     ! now sort the values separately
     call qsort(c_loc(odt%val_buf(1)), int(odt%our_num_obs * (odt%num_vals_per_obs+odt%num_qc_per_obs), c_size_t), sizeof(odt%val_buf(1)), &
     c_funloc(compare_vals))
+    ! if (odt%my_pe == 0) then
+    !     print *, 'odt%val_buf(1)%val: ', odt%val_buf(1)%val
+    !     print *, 'odt%val_buf(2)%val: ', odt%val_buf(2)%val
+    ! endif
 
     ! convert back so our unpacked obs matches the sorting of our packed observations
     ! Note: we're not doing this anymore; let's save some memory
@@ -653,7 +681,7 @@ subroutine samplesort_obs(perc)
     !     enddo
     ! endif
 
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     ! perform gather to retrieve samples 
 
@@ -670,14 +698,14 @@ subroutine samplesort_obs(perc)
         call qsort(c_loc(all_samples(1)), int(all_sample_num, c_size_t), sizeof(all_samples(1)), c_funloc(compare_large_int))
         do i = 1, odt%nprocs - 1
             scnd_selection(i) = all_samples(i * per_proc)
-            print *, scnd_selection(i)
+            ! print *, scnd_selection(i)
         enddo
     endif
 
     call dbg_print('broadcasting new samples')
     call mpi_bcast(scnd_selection, odt%nprocs - 1, MPI_INTEGER8, 0, MPI_COMM_WORLD, odt%ierror)
 
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! return
     ! Now we have buckets in which to sort elements
     ! NOTE: maybe also use these buckets as indicators as to which processes are likely to have which elements
@@ -718,7 +746,7 @@ subroutine samplesort_obs(perc)
 
     
     ! print *, odt%my_pe, 'reached barrier'
-    call mpi_barrier(MPI_COMM_WORLD, ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, ierror)
     ! return 
 
     ! check for identical sets of keys
@@ -747,10 +775,10 @@ subroutine samplesort_obs(perc)
             endif
             if (is_last) then
                 obs_start_idx = 0
-                if (odt%my_pe == 8) then
-                    print *, 'j: ', j
-                    print *, 'i-1: ', i - 1
-                endif
+                ! if (odt%my_pe == 8) then
+                !     print *, 'j: ', j
+                !     print *, 'i-1: ', i - 1
+                ! endif
                 do j = 1, i - 2
                     ! if (odt%my_pe == 8) then
                     !     print *, 'dingus'
@@ -791,12 +819,12 @@ subroutine samplesort_obs(perc)
                     num_sus = 0
                 endif
                 ! first weird: first element that is not equality based
-                if (odt%my_pe == 8) then
-                    print *, 'num_sus: ', num_sus
-                    print *, 'obs_start_idx: ', obs_start_idx
-                    print *, 'bucket_cnt(i - 1)', bucket_cnt(i-1)
-                    print *, 'i - 1: ', i - 1
-                endif
+                ! if (odt%my_pe == 8) then
+                !     print *, 'num_sus: ', num_sus
+                !     print *, 'obs_start_idx: ', obs_start_idx
+                !     print *, 'bucket_cnt(i - 1)', bucket_cnt(i-1)
+                !     print *, 'i - 1: ', i - 1
+                ! endif
                 ! num_sus: num of elements < equality
                 ! num_equal: num of elements == equality
                 num_equal = bucket_cnt(i - 1) - num_sus
@@ -849,14 +877,14 @@ subroutine samplesort_obs(perc)
     ! displacement of values/qc in buffer for *our* process
     allocate(val_qc_disp(odt%nprocs))
 
-    if (odt%my_pe == 8) then
-        do i = 1, odt%nprocs - 1
-            print *, 'bucket_cnt(', i, '): ', bucket_cnt(i)
-        enddo
-    endif
+    ! if (odt%my_pe == 8) then
+    !     do i = 1, odt%nprocs - 1
+    !         print *, 'bucket_cnt(', i, '): ', bucket_cnt(i)
+    !     enddo
+    ! endif
 
     ! print *, 'Process ', odt%my_pe, ' reached barrier #2'
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! return
     ! alltoall on the displacement and count vars
     call dbg_print('attempting to run alltoall #1')
@@ -869,7 +897,7 @@ subroutine samplesort_obs(perc)
     ! call mpi_alltoall(bucket_disp, 1, MPI_INTEGER, new_disp, 1, MPI_INTEGER, MPI_COMM_WORLD, &
     !     odt%ierror)
 
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     ! alltoallv on the elements themselves
     ! (probably the most expensive component of this algorithm)
@@ -896,7 +924,7 @@ subroutine samplesort_obs(perc)
     enddo
 
     call mpi_reduce(new_obs_num, sum, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, odt%ierror)
-    if (odt%my_pe == 0) print *, 'sum: ', sum
+    ! if (odt%my_pe == 0) print *, 'sum: ', sum
 
     ! do i = 0, odt%nprocs - 1
     !     if (odt%my_pe == i) then
@@ -921,13 +949,13 @@ subroutine samplesort_obs(perc)
     allocate(new_obs_set(new_obs_num))
     allocate(new_val_qc(new_vals_num))
 
-    if (odt%my_pe == 8) then
-        do i = 1, odt%nprocs - 1
-            print *, 'bucket_cnt(', i, '): ', bucket_cnt(i)
-        enddo
-    endif
+    ! if (odt%my_pe == 8) then
+    !     do i = 1, odt%nprocs - 1
+    !         print *, 'bucket_cnt(', i, '): ', bucket_cnt(i)
+    !     enddo
+    ! endif
 
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     call dbg_print('attempting alltoallv #1')
     ! alltoallv both the observations and the values
@@ -952,7 +980,7 @@ subroutine samplesort_obs(perc)
     ! call allocate_obs_set(obs_set_sort, new_obs_num, odt%num_vals_per_obs) 
     ! call convert_obs_back(obs_set_sort, new_obs_set, new_val_qc, new_obs_num, odt%num_vals_per_obs)
     call dbg_print("hahahahahahahahha")
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! return
 
     ! reset val_idx before performing next qsort
@@ -1008,13 +1036,13 @@ subroutine samplesort_obs(perc)
     allocate(odt%var_obs_per_proc(odt%nprocs))
     call mpi_allgather(new_obs_num, 1, MPI_INTEGER, odt%var_obs_per_proc, 1, MPI_INTEGER, MPI_COMM_WORLD, odt%ierror)
 
-    if (odt%my_pe == 6) then
-        print *, 'odt%obs_buf(new_obs_num): ', odt%obs_buf(new_obs_num)%time_actual
-    endif
-
-    if (odt%my_pe == 7) then
-        print *, 'odt%obs_buf(1): ', odt%obs_buf(1)%time_actual
-    endif
+    ! if (odt%my_pe == 6) then
+    !     print *, 'odt%obs_buf(new_obs_num): ', odt%obs_buf(new_obs_num)%time_actual
+    ! endif
+    !
+    ! if (odt%my_pe == 7) then
+    !     print *, 'odt%obs_buf(1): ', odt%obs_buf(1)%time_actual
+    ! endif
     ! odt%var_obs_per_proc => new_cnt
 
     ! if (odt%my_pe == 0) then
@@ -1024,11 +1052,11 @@ subroutine samplesort_obs(perc)
     !     call print_obs_send(new_obs_set(new_obs_num))
     ! endif
 
-    if (odt%my_pe == 0) then
-        do i = 1, odt%nprocs
-            print *, 'odt%var_obs_per_proc(', i, '): ', odt%var_obs_per_proc(i)
-        enddo 
-    endif
+    ! if (odt%my_pe == 0) then
+    !     do i = 1, odt%nprocs
+    !         print *, 'odt%var_obs_per_proc(', i, '): ', odt%var_obs_per_proc(i)
+    !     enddo 
+    ! endif
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     call dbg_print('made it to the end')
 end subroutine samplesort_obs
@@ -1146,9 +1174,9 @@ subroutine get_obs_contiguous(obs_buffer, vals_buffer, start, end, proc)
     call mpi_win_unlock(proc, odt%val_win, odt%ierror)
     ! etime = mpi_wtime()
 
-    print *, 'finished get'
-    print *, 'time to get: ', etime - stime
-    print *, 'converting back'
+    ! print *, 'finished get'
+    ! print *, 'time to get: ', etime - stime
+    ! print *, 'converting back'
     ! convert observation(s) back to packed form
     ! call convert_obs_back(obs, obs_buffer, vals_buffer, odt%total_obs, odt%num_vals_per_obs)
 
@@ -1263,7 +1291,7 @@ end subroutine get_obs_on_multi_procs
 ! and then have the conversion handled by a dedicated function in each model (OOP babyyyyy!)
 ! (will be hell for all future model writers [one more function to implement] 
 ! but it's the only way this can be fully implemented across all DART models)
-subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs, is_writer)
+subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs, is_writer, writer_comm)
 
     ! Note: error checking is needed here b/c file I/O wackiness
     ! Notes / Steps:
@@ -1276,18 +1304,24 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     ! type(obs_sequence_type), intent(in) :: seq
     type(obs_type_send),     intent(in) :: obs_write_buf(:)
     type(sortable_real),     intent(in) :: vals_write_buf(:)
-    integer,                 intent(in)     :: num_obs, is_writer
+    integer,                 intent(in)     :: num_obs, is_writer, writer_comm
     character(len=*),        intent(in) :: file_name
 
     integer :: i, file_id, rc, fd, j
     integer :: have(max_defined_types_of_obs)
+    integer :: have_all(max_defined_types_of_obs)
     integer :: obs_kind_ind
+    integer :: num_allocated
     integer :: ntypes
     integer :: val_idx
-    integer(kind=MPI_OFFSET_KIND) :: soff, eoff, header_size, skip
+    integer(kind=MPI_OFFSET_KIND) :: soff, eoff, header_size, skip, pos_off
+    integer :: cons_writes(6), cons_writes_2(10)
+    real(r8) :: loc_buf(3)
     integer :: status(MPI_STATUS_SIZE)
     character(len=11) :: useform
 
+    num_allocated = odt%num_vals_per_obs + odt%num_qc_per_obs
+    header_size = 0
 
     ! if(write_binary_obs_sequence) then
     !    useform = 'unformatted'
@@ -1301,7 +1335,7 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     ! create file if it does not exist
     ! place the file in write-only mode
     ! note: this is collective; every process must call this
-    call mpi_file_open(MPI_COMM_WORLD, file_name, MPI_MODE_WRONLY + MPI_MODE_CREATE, MPI_INFO_NULL, fd, odt%ierror)
+    call mpi_file_open(writer_comm, file_name, MPI_MODE_WRONLY + MPI_MODE_CREATE, MPI_INFO_NULL, fd, odt%ierror)
 
     ! only write to file if we are a writer
     ! todo: determine the types of obs we have
@@ -1310,13 +1344,16 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     if (is_writer) then
         do i = 1, num_obs
             obs_kind_ind = obs_write_buf(i)%kind
+            if (obs_kind_ind == 0) then
+                print *, 'uh oh at obs ', i
+            endif
             if (obs_kind_ind < 0) cycle
             have(obs_kind_ind) = 1
         enddo
     endif
 
     ! do a bitwise 'or' reduce to the first process
-    call mpi_reduce(MPI_IN_PLACE, have, MAX_DEFINED_TYPES_OF_OBS, MPI_INTEGER, MPI_BOR, 0, MPI_COMM_WORLD, odt%ierror)
+    call mpi_reduce(have, have_all, MAX_DEFINED_TYPES_OF_OBS, MPI_INTEGER, MPI_BOR, 0, writer_comm, odt%ierror)
     ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     ! will be used when writing the header
@@ -1324,44 +1361,73 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
     ! first process writes this info; other processes wait at header size bcast
     if (odt%my_pe == 0) then
         
-        call mpi_file_get_byte_offset(fd, soff, odt%ierror)
+        call mpi_file_get_position(fd, pos_off, odt%ierror)
+        call mpi_file_get_byte_offset(fd, pos_off, soff, odt%ierror)
+        ! call mpi_file_get_byte_offset(fd, soff, odt%ierror) this wasn't right oops
         ! write starting point
-        call mpi_file_write(fd, 'obs_sequence', len_trim('obs_sequence'), MPI_CHARACTER, status, odt%ierror)
-        call mpi_file_write(fd, 'obs_type_definitions', len_trim('obs_type_definitions'), MPI_CHARACTER, status, odt%ierror)
+        call mpi_file_write(fd, 12, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, 'obs_sequence', len_trim('obs_sequence'), MPI_CHARACTER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, 12, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+
+        call mpi_file_write(fd, 20, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, 'obs_type_definitions', len_trim('obs_type_definitions'), MPI_CHARACTER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, 20, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
 
         ! write types and number to file
-        ntypes = count(have(:) > 0)
-        call mpi_file_write(fd, ntypes, 1, MPI_INTEGER, status, odt%ierror)
+        ntypes = count(have_all(:) > 0)
+        call mpi_file_write(fd, 4, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, ntypes, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, 4, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+
         do i = 1, max_defined_types_of_obs
-            if (have(i) == 0) cycle
-            call mpi_file_write(fd, obs_type_info(i)%index, 1, MPI_INTEGER, status, odt%ierror)
-            call mpi_file_write(fd, obs_type_info(i)%name, obstypelength, MPI_CHARACTER, status, odt%ierror)
+            if (have_all(i) == 0) cycle
+            call mpi_file_write(fd, obstypelength+4, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+            call mpi_file_write(fd, obs_type_info(i)%index, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+            call mpi_file_write(fd, obs_type_info(i)%name, obstypelength, MPI_CHARACTER, MPI_STATUS_IGNORE, odt%ierror)
+            call mpi_file_write(fd, obstypelength+4, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+
         enddo
 
         ! write num_obs and num_copies
-        call mpi_file_write(fd, odt%num_vals_per_obs, 1, MPI_INTEGER, status, odt%ierror)
-        call mpi_file_write(fd, odt%num_qc_per_obs, 1, MPI_INTEGER, status, odt%ierror)
-        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror) ! num_obs
-        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror) ! max_num_obs
+        call mpi_file_write(fd, 16, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, odt%num_vals_per_obs, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, odt%num_qc_per_obs, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror) ! num_obs
+        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror) ! max_num_obs
+        call mpi_file_write(fd, 16, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
 
         ! todo: need to figure out how to get val_md and qc_md into their correct locations
         ! okay I have something which should (?) work (every process reads in info when reading the files)
         do i = 1, odt%num_vals_per_obs
-            call mpi_file_write(fd, odt%val_md(i), metadatalength, MPI_CHARACTER, status, odt%ierror)
+            call mpi_file_write(fd, metadatalength, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+            call mpi_file_write(fd, odt%val_md(i), metadatalength, MPI_CHARACTER, MPI_STATUS_IGNORE, odt%ierror)
+            call mpi_file_write(fd, metadatalength, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
         enddo
         do i = 1, odt%num_qc_per_obs
-            call mpi_file_write(fd, odt%qc_md(i), metadatalength, MPI_CHARACTER, status, odt%ierror)
+            call mpi_file_write(fd, metadatalength, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+            call mpi_file_write(fd, odt%qc_md(i), metadatalength, MPI_CHARACTER, MPI_STATUS_IGNORE, odt%ierror)
+            call mpi_file_write(fd, metadatalength, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
         enddo
 
         ! first time and last time are just 1 and total_obs, respectively 
-        call mpi_file_write(fd, 1, 1, MPI_INTEGER, status, odt%ierror)
-        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, status, odt%ierror)
-        call mpi_file_get_byte_offset(fd, eoff, odt%ierror)
-        header_size = eoff - soff
+        call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, 1, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, odt%total_obs, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+        call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+
     endif
 
+    ! make sure first process has finished fully writing before moving further
+    call mpi_file_sync(fd, odt%ierror)
+    if (odt%my_pe == 0) then
+        call mpi_file_get_position(fd, pos_off, odt%ierror)
+        call mpi_file_get_byte_offset(fd, pos_off, eoff, odt%ierror)
+        header_size = eoff - soff
+    endif
+    ! call exit(1)
     ! broadcast header size to everybody else
-    call mpi_bcast(header_size, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, odt%ierror)
+    call mpi_bcast(header_size, 1, MPI_INTEGER, 0, writer_comm, odt%ierror)
+    ! header_size = 0
     ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
     ! after header has been written, write the rest of the sequence
@@ -1375,8 +1441,11 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
         ! print *, 'do something here'
 
         ! calculate how many bytes we're skipping
-        skip = (odt%obs_size * (obs_write_buf(1)%key - 1)) + header_size
-        call mpi_file_seek(fd, skip, MPI_SEEK_SET, odt%ierror)
+        if (odt%my_pe /= 0) then
+            skip = int(odt%obs_size, i8) * int((obs_write_buf(1)%key - 1), i8) + int(header_size, i8)
+            ! print *, 'skip: ', skip
+            call mpi_file_seek(fd, skip, MPI_SEEK_SET, odt%ierror)
+        endif
 
         ! write the observations
         ! will probably make assumptions about the structure of obs_def; could be a problem?
@@ -1384,41 +1453,99 @@ subroutine write_obs_seq_dist(obs_write_buf, vals_write_buf, file_name, num_obs,
         ! also, we're not handling external_FO for the time being 
         ! it also looks like additional information may be written for each kind
         val_idx = 0
+        ! if (odt%my_pe == 0) then
+        !     print *, 'pe : 176 ; num_obs in write_obs_seq_dist: ', num_obs
+        !     print *, 'pe : 176 ; num_vals_per_obs : ', odt%num_vals_per_obs
+        !     print *, 'pe : 176 ; num_qc_per_obs : ', odt%num_qc_per_obs
+        !     print *, 'pe : 176 ; num_allocated : ', num_allocated
+        ! endif
+
+        call mpi_barrier(writer_comm, odt%ierror)
         do i = 1, num_obs
-           call mpi_file_write(fd, obs_write_buf(i)%prev_time, 1, MPI_INTEGER, status, odt%ierror) 
-           call mpi_file_write(fd, obs_write_buf(i)%next_time, 1, MPI_INTEGER, status, odt%ierror) 
-           call mpi_file_write(fd, obs_write_buf(i)%cov_group, 1, MPI_INTEGER, status, odt%ierror) 
+           ! print *, 'process ', odt%my_pe, ' made it to first mpi_file_write_all' 
 
            ! write values and qc
-           do j = 1, odt%num_vals_per_obs + odt%num_qc_per_obs
-                call mpi_file_write(fd, vals_write_buf(val_idx+j)%val, 1, MPI_REAL8, status, odt%ierror) 
+           do j = 1, num_allocated
+                call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+                call mpi_file_write(fd, vals_write_buf(val_idx+j)%val, 1, MPI_REAL8, MPI_STATUS_IGNORE, odt%ierror) 
+                call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
            enddo
-           val_idx = val_idx + j
+           val_idx = val_idx + j - 1    
 
-           ! observation location
-           ! (assumes loc3d)
-           call mpi_file_write(fd, obs_write_buf(i)%lon, 1, MPI_REAL8, status, odt%ierror)
-           call mpi_file_write(fd, obs_write_buf(i)%lat, 1, MPI_REAL8, status, odt%ierror)
-           call mpi_file_write(fd, obs_write_buf(i)%vloc, 1, MPI_REAL8, status, odt%ierror)
-           call mpi_file_write(fd, obs_write_buf(i)%which_vert, 1, MPI_INTEGER, status, odt%ierror)
+           cons_writes = (/12, obs_write_buf(i)%prev_time, obs_write_buf(i)%next_time, obs_write_buf(i)%cov_group, 12, 28/)
+           call mpi_file_write(fd, cons_writes, 6, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, 12, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, obs_write_buf(i)%prev_time, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror) 
+           ! call mpi_file_write(fd, obs_write_buf(i)%next_time, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror) 
+           ! call mpi_file_write(fd, obs_write_buf(i)%cov_group, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror) 
+           ! call mpi_file_write(fd, 12, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! ! if (odt%my_pe == 0 .and. modulo(i, 100000) == 0) then
+           ! !     print *, 'i : ', i
+           ! !     print *, 'val_idx: ', val_idx
+           ! ! endif
+           !
+           ! ! observation location
+           ! ! (assumes loc3d)
+           ! call mpi_file_write(fd, 28, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           loc_buf = (/obs_write_buf(i)%lon, obs_write_buf(i)%lat, obs_write_buf(i)%vloc/)
+           call mpi_file_write(fd, loc_buf, 3, MPI_REAL8, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, obs_write_buf(i)%lon, 1, MPI_REAL8, MPI_STATUS_IGNORE, odt%ierror)
+           !
+           ! call mpi_file_write(fd, obs_write_buf(i)%lat, 1, MPI_REAL8, MPI_STATUS_IGNORE, odt%ierror)
+           !
+           ! call mpi_file_write(fd, obs_write_buf(i)%vloc, 1, MPI_REAL8, MPI_STATUS_IGNORE, odt%ierror)
+           !
+           ! call mpi_file_write(fd, obs_write_buf(i)%which_vert, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           cons_writes_2 = (/obs_write_buf(i)%which_vert, 28, 4, obs_write_buf(i)%kind, 4, 8, obs_write_buf(i)%seconds, obs_write_buf(i)%days, 8, 8/)
+           call mpi_file_write(fd, cons_writes_2, 10, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, 28, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           !
+           ! ! observation type
+           ! call mpi_file_write(fd, 4, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, obs_write_buf(i)%kind, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, 4, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           !
+           ! ! time
+           ! call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, obs_write_buf(i)%seconds, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, obs_write_buf(i)%days, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           ! 
+           ! ! error variance
+           ! call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
+           call mpi_file_write(fd, obs_write_buf(i)%error_variance, 1, MPI_REAL8, MPI_STATUS_IGNORE, odt%ierror)
+           call mpi_file_write(fd, 8, 1, MPI_INTEGER, MPI_STATUS_IGNORE, odt%ierror)
 
-           ! observation type
-           call mpi_file_write(fd, obs_write_buf(i)%kind, 1, MPI_INTEGER, status, odt%ierror)
-
-           ! time
-           call mpi_file_write(fd, obs_write_buf(i)%seconds, 1, MPI_INTEGER, status, odt%ierror)
-           call mpi_file_write(fd, obs_write_buf(i)%days, 1, MPI_INTEGER, status, odt%ierror)
-           
-           ! error variance
-           call mpi_file_write(fd, obs_write_buf(i)%error_variance, 1, MPI_REAL8, status, odt%ierror)
+           ! if (i == 1) then
+           !     call exit(1)
+           ! endif
+           ! call mpi_file_sync(fd, odt%ierror)
+           if (modulo(i, 100000) == 0) then
+               ! call mpi_file_sync(fd, odt%ierror)
+               if (odt%my_pe == 0) then
+                   print *, 'written obs ', i 
+               endif
+           endif
         enddo
+
+        ! if (odt%my_pe == 0) then
+        !     print *, 'process ', odt%my_pe, ' finished writing'
+        ! endif
 
     endif
 
     ! wait for our writers to finish
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(writer_comm, odt%ierror)
+
+    if (odt%my_pe == 0) then
+        print *, 'syncing file'
+    endif
+    call mpi_file_sync(fd, odt%ierror)
 
     ! close the file
+    if (odt%my_pe == 0) then
+        print *, 'closing the file'
+    endif
     call mpi_file_close(fd, odt%ierror)
 
 end subroutine write_obs_seq_dist

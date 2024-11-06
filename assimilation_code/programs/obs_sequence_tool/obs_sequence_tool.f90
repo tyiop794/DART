@@ -68,7 +68,8 @@ integer :: total_obs_on_proc, total_obs, test_proc
 integer :: ierror
 integer :: ofp_tmp, ofp_rem, curr_key, writers
 integer :: nprocs, my_pe, pe_obs
-integer :: obs_per_writer, our_writer_obs, pe_on_node, is_writer, our_node_num
+integer :: obs_per_writer, our_writer_obs, pe_on_node, is_writer, our_node_num, writer_comm
+real(r8) :: stime, etime, ttime
 type(obs_type_send),allocatable :: obs_write_buf(:)
 type(sortable_real),allocatable :: val_write_buf(:)
 integer :: writers_per_node, writer_rem, startproc, endproc, curr_ofp_val, num_nodes, writer_node_rem, writers_on_this_node
@@ -467,6 +468,11 @@ size_seq_out     = 0
 ! into array allocated size num_input_files
 ! calculate num obs per proc on process 0 (easier to perform)
 ! broadcast information to all processes
+
+stime = 0.0
+etime = 0.0
+ttime = 0.0
+stime = mpi_wtime()
 odt%my_pe = my_pe
 odt%nprocs = nprocs
 odt%obs_win = 0
@@ -517,8 +523,8 @@ do i = 1, num_input_files
    endif
 
    ! If we are designated reader for an obs file, then read header
-   if (modulo(i, odt%my_pe + 1) == 0 .and. file_cnt > 0) then 
-       print *, 'hi there from pe ', odt%my_pe
+   if (modulo(i-1, odt%nprocs) == odt%my_pe .and. file_cnt > 0) then 
+       ! print *, 'hi there from pe ', odt%my_pe
        cnt = cnt + 1
        file_cnt = file_cnt - 1
        call read_obs_seq_header(filename_seq(i), num_copies_in, num_qc_in, &
@@ -528,7 +534,7 @@ do i = 1, num_input_files
         ! size_seq_in: number of observations in file
         ! store this value in array 
         obs_per_file_per_proc(cnt) = size_seq_in
-        print *, 'obs_per_file_per_proc(', cnt, '): pe ', odt%my_pe, ' = ', obs_per_file_per_proc(cnt)
+        ! print *, 'obs_per_file_per_proc(', cnt, '): pe ', odt%my_pe, ' = ', obs_per_file_per_proc(cnt)
     endif
 enddo
 
@@ -590,11 +596,11 @@ allocate(ofp(num_input_files))
 ! okay...let's try something simpler
 ! we're doing a lot of sends and recvs down below...
 ! why not use one collective instead?
-if (odt%my_pe == 0) then
-    do i = 1, num_input_files
-        print *, 'num_obs_per_file(', i, '): ', num_obs_per_file(i)
-    enddo
-endif
+! if (odt%my_pe == 0) then
+!     do i = 1, num_input_files
+!         print *, 'num_obs_per_file(', i, '): ', num_obs_per_file(i)
+!     enddo
+! endif
 
 call mpi_bcast(num_obs_per_file, num_input_files, MPI_INTEGER, 0, MPI_COMM_WORLD, odt%ierror)
 
@@ -618,15 +624,15 @@ enddo
 ! actually I might need the total_obs per file, so this may not work....
 
 ! print for verification
-if (odt%my_pe == 1) then
-    do i = 1, num_input_files
-        print *, 'ofp(', i, '): ', ofp(i)
-    enddo
-endif
+! if (odt%my_pe == 1) then
+!     do i = 1, num_input_files
+!         print *, 'ofp(', i, '): ', ofp(i)
+!     enddo
+! endif
 
 
-call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-if (odt%my_pe == 0) print *, 'Checkpoint 2 passed'
+! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! if (odt%my_pe == 0) print *, 'Checkpoint 2 passed'
 ! call exit(0)
 ! return
 
@@ -687,8 +693,8 @@ allocate(obs_buf(total_obs_on_proc))
 allocate(val_buf(total_obs_on_proc*(num_copies_in + num_qc_in)))
 
 ! wait until both buffers are allocated
-call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-if (odt%my_pe == 0) print *, 'Checkpoint 3 passed'
+! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! if (odt%my_pe == 0) print *, 'Checkpoint 3 passed'
 ! call exit(0)
 ! return 
 
@@ -706,15 +712,17 @@ do i = 0, odt%nprocs - 1
         curr_ofp = ofp(scnd_idx)
         odt%our_num_obs = ofp(scnd_idx)
         odt%total_obs = num_obs_per_file(scnd_idx)
+        ! print *, 'num_obs_per_file(', scnd_idx, '): ', num_obs_per_file(scnd_idx)
+        ! print *, 'ofp(', scnd_idx, '): ', ofp(scnd_idx)
         end_idx = end_idx + curr_ofp
         curr_ofp_val = ofp(scnd_idx) * (num_copies_in + num_qc_in)
         end_val_idx = end_val_idx + curr_ofp_val
         ! note: need to perform arithmetic to determine correct location of pointer (as if this wasn't already a messy nightmare)
-        if (odt%my_pe == 0) then
-            print *, 'start_idx: ', start_idx
-            print *, 'end_idx: ', end_idx
-            print *, 'ofp(', scnd_idx, '): ', curr_ofp
-        endif
+        ! if (odt%my_pe == 0) then
+        !     print *, 'start_idx: ', start_idx
+        !     print *, 'end_idx: ', end_idx
+        !     print *, 'ofp(', scnd_idx, '): ', curr_ofp
+        ! endif
         odt%obs_buf => obs_buf(start_idx:end_idx)
         odt%val_buf => val_buf(start_val_idx:end_val_idx)
         ! if (odt%my_pe == 0) then
@@ -726,6 +734,7 @@ do i = 0, odt%nprocs - 1
         
         ! perform the read
         ! serves as our vessel
+        ! print *, 'filename_seq(', fidx, '): ', filename_seq(fidx)
         call read_obs_seq(filename_seq(fidx), 0, 0, 0, foo, 1)
         
         ! filename_seq(fidx)
@@ -735,6 +744,7 @@ do i = 0, odt%nprocs - 1
     enddo
 enddo
 
+call setup_obs_mpi(odt%obs_mpi, odt%val_mpi)
 ! Set correct values so samplesort doesn't flip
 ! I think this is all samplesort needs...right?
 odt%obs_buf => obs_buf
@@ -743,6 +753,11 @@ odt%our_num_obs = total_obs_on_proc
 odt%total_obs = total_obs
 odt%test_mode = 0
 
+! if (odt%my_pe == 0) then
+!     print *, 'odt%obs_buf(1): ', odt%obs_buf(1)%key
+!     print *, 'odt%val_buf(1): ', odt%val_buf(1)%val
+!     print *, 'odt%val_buf(2): ', odt%val_buf(2)%val
+! endif
 call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
 ! verify that we read observations correctly
@@ -763,35 +778,45 @@ call samplesort_obs(1)
 
 ! run a simple test verifying that the sort is valid
 
-curr_time = 0
-max_time = 0
-do i = 0, odt%nprocs - 1
-    if (odt%my_pe == i) then
-        do j = 1, odt%our_num_obs
-            curr_time = odt%obs_buf(j)%time_actual
-            if (curr_time < max_time) then
-                print *, 'uh oh'
-                print *, 'curr_time: ', curr_time
-                print *, 'max_time: ', max_time
-                print *, 'j: ', j
-                call exit(1)
-            else
-                max_time = curr_time
-            endif
-        enddo
-    endif
-    call mpi_bcast(max_time, 1, MPI_INTEGER8, i, MPI_COMM_WORLD, odt%ierror)
-    if (odt%my_pe == i) print *, 'max_time: ', max_time, ';  pe: ', odt%my_pe
-enddo
+! curr_time = 0
+! max_time = 0
+! do i = 0, odt%nprocs - 1
+!     if (odt%my_pe == i) then
+!         do j = 1, odt%our_num_obs
+!             curr_time = odt%obs_buf(j)%time_actual
+!             if (curr_time < max_time) then
+!                 print *, 'uh oh'
+!                 print *, 'curr_time: ', curr_time
+!                 print *, 'max_time: ', max_time
+!                 print *, 'j: ', j
+!                 call exit(1)
+!             else
+!                 max_time = curr_time
+!             endif
+!         enddo
+!     endif
+!     call mpi_bcast(max_time, 1, MPI_INTEGER8, i, MPI_COMM_WORLD, odt%ierror)
+!     ! if (odt%my_pe == i) print *, 'max_time: ', max_time, ';  pe: ', odt%my_pe
+! enddo
 
-call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-if (odt%my_pe == 0) print *, 'Checkpoint 5 passed'
+! if (odt%my_pe == 0) then
+!     do i = 1, odt%our_num_obs * (odt%num_vals_per_obs + odt%num_qc_per_obs)
+!         if (i <= 2) then
+!             print *, 'odt%val_buf(', i, '): ', odt%val_buf(i)%val
+!         endif
+!         if (i == 1) then
+!             print *, 'odt%obs_buf(', 1, ')%key: ', odt%obs_buf(1)%key
+!         endif
+!     enddo
+! endif
+! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! if (odt%my_pe == 0) print *, 'Checkpoint 5 passed'
 ! call exit(0)
 ! return
 
 
-if (odt%my_pe == 0) print *, 'Made it to the end of part 1!!!'
-call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! if (odt%my_pe == 0) print *, 'Made it to the end of part 1!!!'
+! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 
 ! We've made it to this point! Good!
 ! call exit(0)
@@ -843,10 +868,10 @@ enddo
 ! writer_pe = 0
 num_nodes = odt%nprocs / 128 
 if (num_nodes == 0) num_nodes = 1
-if (odt%nprocs < 100) then
+if (odt%nprocs < (8 * num_nodes)) then
     writers = odt%nprocs
 else
-    writers = 100
+    writers = 8 * num_nodes     
 endif
 obs_per_writer = odt%total_obs / writers
 our_writer_obs = obs_per_writer
@@ -855,12 +880,12 @@ writer_rem = modulo(odt%total_obs, writers)
 !     our_writer_obs = our_writer_obs + 1
 ! endif
 
-do i = 0, odt%nprocs - 1
-    if (odt%my_pe == i) then
-        print *, 'our_writer_obs: ', our_writer_obs
-    endif
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-enddo
+! do i = 0, odt%nprocs - 1
+!     if (odt%my_pe == i) then
+!         print *, 'our_writer_obs: ', our_writer_obs
+!     endif
+!     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! enddo
 
 
 ! do stuffs if we're a writer
@@ -871,9 +896,9 @@ call reset_obs_window()
 ! verify that we modify the obs windows correctly 
 ! and that the offsets are correct
 ! before we try to grab from the processes
-call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-if (odt%my_pe == 0) print *, 'Checkpoint 6 passed'
-call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+! if (odt%my_pe == 0) print *, 'Checkpoint 6 passed'
+! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 ! call exit(0)
 
 ! virtual set of pes 
@@ -881,7 +906,7 @@ call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
 pe_obs = 0 
 
 ! todo: find a way to get the number of processes per node
-if (writers == 100) then
+if (writers == writers) then
     ! assume (for now) that we're using all of the processes on each node, and that each node has 128 processes
     ! test_proc = 44
     ! TODO: should find out how many processes are on each node;
@@ -970,11 +995,11 @@ if (writers == 100) then
         !         print *, 'huh... pe : ', odt%my_pe, ' obs num : ', i  
         !     endif
         ! enddo
-        ! do i = 1, our_writer_obs * (odt%num_vals_per_obs + odt%num_qc_per_obs)
-        !     if (val_write_buf(i)%time_order == 0) then
-        !         print *, 'huh... pe : ', odt%my_pe, ' val num : ', i  
-        !     endif
-        ! enddo
+        ! if (odt%my_pe == 0) then
+        !     do i = 1, our_writer_obs * (odt%num_vals_per_obs + odt%num_qc_per_obs)
+        !         print *, 'val_write_buf(', i, '): ', val_write_buf(i)
+        !     enddo
+        ! endif
         ! if (odt%my_pe == 48) then
         !     print *, 'last key on proc 48: ', obs_write_buf(our_writer_obs)%key
         ! endif
@@ -983,7 +1008,7 @@ if (writers == 100) then
         ! endif
 
         ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-        ! print *, 'buh bye!'
+        ! ! print *, 'buh bye!'
         ! call exit(0)
 
         ! after this: obs_write_buf and val_write_buf should have the correct observations
@@ -993,15 +1018,28 @@ if (writers == 100) then
 
     endif
 
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
-    call dbg_print('Checkpoint 7 passed')
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! call dbg_print('Checkpoint 7 passed')
+    ! if (odt%my_pe == 176) then
+    !     print *, 'pe: 176 ; our_writer_obs : ', our_writer_obs
+    ! endif
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     ! call exit(0)
     ! return
 
-    call write_obs_seq_dist(obs_write_buf, val_write_buf, 'test.bin', our_writer_obs, is_writer)
-    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    ! before we perform write_obs_seq_dist, create a separate communicator for just writers
+    call mpi_comm_split(MPI_COMM_WORLD, is_writer, pe_obs, writer_comm, odt%ierror)
+    
+    ! only cal write_obs_seq_dist if we are a writer
+    if (is_writer) then
+        call write_obs_seq_dist(obs_write_buf, val_write_buf, 'test.bin', our_writer_obs, is_writer, writer_comm)
+    endif
+    ! call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     call dbg_print('Checkpoint 8 passed')
+    call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
+    etime = mpi_wtime()
+    ttime = etime - stime
+    if (odt%my_pe == 0) print *, 'Total time for obs_seq_tool_parallel: ', ttime
     call mpi_barrier(MPI_COMM_WORLD, odt%ierror)
     call exit(0)
     ! return

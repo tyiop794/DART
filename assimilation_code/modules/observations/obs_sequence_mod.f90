@@ -1283,9 +1283,9 @@ if (.not. allocated(odt%qc_md)) then
 endif
 
 ! some test code; nothing to see here....
-if (odt%my_pe == 0) print *, 'num_copies: ', num_copies 
-if (odt%my_pe == 0) print *, 'num_qc: ', num_qc 
-if (odt%my_pe == 0) print *, 'num_obs: ', num_obs 
+! if (odt%my_pe == 0) print *, 'num_copies: ', num_copies 
+! if (odt%my_pe == 0) print *, 'num_qc: ', num_qc 
+! if (odt%my_pe == 0) print *, 'num_obs: ', num_obs 
 if (odt%obs_seq_tool == 1) then
     ! file_id = open_file(file_name, form='unformatted', action='read')
     num_copies = odt%num_vals_per_obs
@@ -1299,7 +1299,7 @@ endif
 ! print *, '2'
 total_copies = num_copies
 total_obs = num_obs
-if (odt%my_pe == 0) print *, 'total_obs: ', total_obs
+! if (odt%my_pe == 0) print *, 'total_obs: ', total_obs
 root = 0
 
 ! Split by how much?
@@ -1315,9 +1315,12 @@ if (odt%obs_seq_tool == 0) then
     rem = modulo(total_obs, mpi_num)
     num_alloc = num_obs_per_proc + 1
 else
-    num_obs_per_proc = odt%our_num_obs
-    rem = 0 
+    num_obs_per_proc = total_obs / mpi_num
+    rem = modulo(total_obs, mpi_num) 
     num_alloc = odt%our_num_obs
+    ! num_obs_per_proc = odt%our_num_obs
+    ! rem = 0
+    ! num_alloc = odt%our_num_obs
 endif
 ! my_pe = my_task_id()
 my_pe = odt%my_pe
@@ -1358,7 +1361,7 @@ do i = 1, num_copies
    if(read_format == 'unformatted') then
       read(file_id, iostat=io) seq%copy_meta_data(i)
       odt%val_md(i) = seq%copy_meta_data(i)
-      if (odt%my_pe == 0) print *, 'copy_meta_data: ', seq%copy_meta_data(i)
+      ! if (odt%my_pe == 0) print *, 'copy_meta_data: ', seq%copy_meta_data(i)
    else
       read(file_id, '(a)', iostat=io) seq%copy_meta_data(i)
    endif
@@ -1374,7 +1377,7 @@ do i = 1, num_qc
    if(read_format == 'unformatted') then
       read(file_id, iostat=io) seq%qc_meta_data(i)
       odt%qc_md(i) = seq%qc_meta_data(i)
-      if (odt%my_pe == 0) print *, 'qc_meta_data: ', seq%qc_meta_data(i)
+      ! if (odt%my_pe == 0) print *, 'qc_meta_data: ', seq%qc_meta_data(i)
    else
       read(file_id, '(a)', iostat=io) seq%qc_meta_data(i)
    endif
@@ -1528,7 +1531,9 @@ if (my_pe >= 0) then
 endif
 
 ! print *, 'Process ', my_pe, ' reached barrier'
-call mpi_barrier(MPI_COMM_WORLD, ierror)
+if (odt%obs_seq_tool == 0) then
+    call mpi_barrier(MPI_COMM_WORLD, ierror)
+endif
 
 ! call dist_obs_set(buffer, full_buf, num_obs, num_copies, mpi_num, root, nthreads)
 ! total_obs = num_obs_per_proc * mpi_num
@@ -1539,7 +1544,9 @@ call initialize_obs_window(buffer, num_obs_per_proc, total_copies, num_qc, total
 ! call mpi_barrier(MPI_COMM_WORLD, ierror)
 
 ! if (my_task_id() == 0) call print_obs_send(odt%obs_buf(my_obs))
-call mpi_barrier(MPI_COMM_WORLD, ierror)
+if (odt%obs_seq_tool == 0) then
+    call mpi_barrier(MPI_COMM_WORLD, ierror)
+endif
 
 ! For obs_sequence_tool, as soon as we're done with reading the obs and setting up the buffer, get outta here!
 if (odt%obs_seq_tool) then
